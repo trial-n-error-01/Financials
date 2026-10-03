@@ -1,6 +1,8 @@
 "use client";
 
 import { startTransition, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import { addDoc, collection, deleteDoc, doc, enableNetwork, getDocs, onSnapshot, query, setDoc, updateDoc, where, writeBatch } from "firebase/firestore";
 import { onAuthStateChanged, type User } from "firebase/auth";
 import Papa from "papaparse";
@@ -44,8 +46,8 @@ const demoTransactions: Transaction[] = [
 
 const money = new Intl.NumberFormat("en-HK", { style: "currency", currency: "HKD" });
 const formatMoney = (hkdCents: number) => money.format(hkdCents / 100);
-const monthKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 const monthLabel = (key: string) => key === "all" ? "All months" : new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric" }).format(new Date(`${key}-01T12:00:00`));
+const monthNames = Array.from({ length: 12 }, (_, index) => new Intl.DateTimeFormat("en-GB", { month: "long" }).format(new Date(2026, index, 1)).toLowerCase());
 
 function parseYearlyExpenseCache(value: string): Record<string, YearlyExpenseEntry[]> {
   const cached = JSON.parse(value) as Record<string, unknown>;
@@ -69,6 +71,18 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
 }
 
 export default function Home() {
+  const pathname = usePathname();
+  const router = useRouter();
+  const pathSegments = pathname.split("/").filter(Boolean);
+  const routeYear = /^\d{4}$/.test(pathSegments[0] ?? "") ? pathSegments[0] : "";
+  const routeMonthIndex = monthNames.indexOf((pathSegments[1] ?? "").toLowerCase());
+  const isYearlyExpenseRoute = pathSegments[1] === "taxes-and-others";
+  const isOverallView = pathname === "/overall" || pathname === "/";
+  const selectedMonth = isYearlyExpenseRoute
+    ? "yearly-expenses"
+    : routeYear && routeMonthIndex >= 0
+      ? `${routeYear}-${String(routeMonthIndex + 1).padStart(2, "0")}`
+      : "all";
   const [user, setUser] = useState<User | null>(null);
   const [transactions, setTransactions] = useState<Transaction[]>(firebaseConfigured ? [] : demoTransactions);
   const [monthlyPlans, setMonthlyPlans] = useState<MonthlyPlan[]>([]);
@@ -84,7 +98,6 @@ export default function Home() {
   const [planSaveError, setPlanSaveError] = useState("");
   const [planSaveMessage, setPlanSaveMessage] = useState("");
   const [savingPlan, setSavingPlan] = useState(false);
-  const [selectedMonth, setSelectedMonth] = useState(monthKey(new Date()));
   const [showExpenseHistory, setShowExpenseHistory] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [filterCategory, setFilterCategory] = useState("");
@@ -103,6 +116,21 @@ export default function Home() {
   const [deletingId, setDeletingId] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("date");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
+
+  useEffect(() => {
+    if (pathname === "/") {
+      router.replace("/overall");
+      return;
+    }
+    if (pathname === "/overall") return;
+    if (!routeYear) {
+      router.replace("/overall");
+      return;
+    }
+    if (pathSegments.length > 1 && routeMonthIndex === -1 && !isYearlyExpenseRoute) {
+      router.replace(`/${routeYear}`);
+    }
+  }, [pathname, pathSegments.length, routeMonthIndex, routeYear, isYearlyExpenseRoute, router]);
 
   useEffect(() => {
     if (!auth) return;
@@ -244,7 +272,7 @@ export default function Home() {
 
   const categories = useMemo(() => [...new Set(userCategories)].sort(), [userCategories]);
 
-  const currentYear = new Date().getFullYear();
+  const currentYear = routeYear ? Number(routeYear) : new Date().getFullYear();
   const currentYearExpenseEntries = yearlyExpenses[String(currentYear)] ?? [];
   const yearlyExpenseTotal = currentYearExpenseEntries.reduce((total, expense) => total + expense.amountCents, 0);
   const yearMonths = useMemo(() => Array.from({ length: 12 }, (_, index) => {
@@ -295,7 +323,7 @@ export default function Home() {
   const yearBudget = yearMonths.reduce((total, item) => total + item.budgetCents, 0);
   const yearSalary = yearMonths.reduce((total, item) => total + item.salaryCents, 0);
   const yearOverBudget = yearMonths.reduce((total, item) => total + item.overBudgetCents, 0);
-  const yearSavings = yearSalary - yearTotal;
+  const yearSavings = yearSalary - yearTotal - yearlyExpenseTotal;
   const maxYearValue = Math.max(...yearMonths.flatMap((item) => [item.total, item.budgetCents, Math.abs(item.savingsCents)]), 1);
   const saveMonthlyPlan = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -491,6 +519,92 @@ export default function Home() {
   };
 
   const sortIndicator = (key: SortKey) => sortKey === key ? (sortDirection === "asc" ? " ^" : " v") : "";
+  const navigateToMonth = (month: string) => {
+    if (month === "all") {
+      router.push(`/${currentYear}`);
+      return;
+    }
+    if (month === "yearly-expenses") {
+      router.push(`/${currentYear}/taxes-and-others`);
+      return;
+    }
+    const match = month.match(/^(\d{4})-(\d{2})$/);
+    const index = match ? Number(match[2]) - 1 : -1;
+    if (match && index >= 0 && index < 12) router.push(`/${match[1]}/${monthNames[index]}`);
+  };
+
+  if (isOverallView) {
+    const availableYears = [...new Set([
+      ...transactions.map((transaction) => transaction.date.slice(0, 4)),
+      ...monthlyPlans.map((plan) => plan.month.slice(0, 4)),
+      ...Object.keys(yearlyExpenses),
+      String(new Date().getFullYear()),
+    ])].filter((year) => /^\d{4}$/.test(year)).sort((left, right) => Number(right) - Number(left));
+    const annualSummaries = availableYears.map((year) => {
+      const annualTransactions = transactions.filter((transaction) => transaction.date.startsWith(`${year}-`));
+      const annualTotal = annualTransactions.reduce((total, transaction) => total + transaction.amountCents, 0);
+      const annualPlans = monthlyPlans.filter((plan) => plan.month.startsWith(`${year}-`));
+      const annualBudget = annualPlans.reduce((total, plan) => total + plan.budgetCents, 0);
+      const annualSalary = annualPlans.reduce((total, plan) => total + plan.salaryCents, 0);
+      const annualExpenseEntries = yearlyExpenses[year] ?? [];
+      const annualExtraExpenses = annualExpenseEntries.reduce((total, expense) => total + expense.amountCents, 0);
+      const savings = annualSalary > 0 ? annualSalary - annualTotal - annualExtraExpenses : null;
+      const budgetVariance = annualBudget > 0 ? annualBudget - annualTotal : null;
+      const metrics = [
+        { label: "Savings", value: savings, detail: savings === null ? "No salary plan" : "After taxes & other expenses", color: "bg-[#4f8271]" },
+        { label: "Budget variance", value: budgetVariance, detail: budgetVariance === null ? "No budget set" : budgetVariance >= 0 ? "Under budget" : "Over budget", color: budgetVariance === null ? "bg-[#65715e]" : budgetVariance >= 0 ? "bg-[#4f8271]" : "bg-[#bf5b3f]" },
+        { label: "Taxes & other", value: annualExtraExpenses, detail: `${annualExpenseEntries.length} ${annualExpenseEntries.length === 1 ? "item" : "items"}`, color: "bg-[#bf5b3f]" },
+      ];
+      return { year, annualTotal, transactionCount: annualTransactions.length, metrics };
+    });
+    const maxMetricValue = Math.max(1, ...annualSummaries.flatMap(({ metrics }) => metrics.map((metric) => Math.abs(metric.value ?? 0))));
+
+    return (
+      <main className="min-h-screen bg-[#f4f1ea] px-5 py-8 text-[#20251f] sm:px-8 lg:px-12">
+        <div className="mx-auto max-w-5xl">
+          <header className="border-b border-[#20251f]/20 pb-6">
+            <Link className="text-xs font-semibold uppercase tracking-[0.2em] text-[#65715e]" href="/overall">Financials</Link>
+            <h1 className="mt-3 text-3xl font-semibold">Your years</h1>
+          </header>
+          <div className="divide-y divide-[#20251f]/20">
+            {annualSummaries.map(({ year, annualTotal, transactionCount, metrics }) => (
+                <section className="grid gap-5 py-6 sm:grid-cols-[150px_minmax(0,1fr)] sm:gap-8" key={year}>
+                  <div>
+                    <Link className="text-2xl font-semibold hover:text-[#bf5b3f]" href={`/${year}`}>{year}</Link>
+                    <p className="mt-1 text-sm text-[#65715e]">{formatMoney(annualTotal)}</p>
+                    <p className="text-xs text-[#65715e]">{transactionCount} expenses</p>
+                  </div>
+                  <div aria-label={`${year} annual savings, budget variance, and taxes and other expenses`} className="space-y-4" role="group">
+                    {metrics.map((metric) => (
+                      <div className="grid gap-2 sm:grid-cols-[minmax(120px,0.8fr)_minmax(120px,2fr)_minmax(140px,auto)] sm:items-center sm:gap-4" key={metric.label}>
+                        <p className="text-sm font-semibold">{metric.label}</p>
+                        <div aria-hidden="true" className="relative h-3 bg-[#20251f]/5">
+                          <span className="absolute inset-y-0 left-1/2 w-px bg-[#20251f]/35" />
+                          {metric.value !== null && metric.value !== 0 && (
+                            <span
+                              className={`absolute top-0.5 h-2 ${metric.color}`}
+                              style={{
+                                left: metric.value > 0 ? "50%" : undefined,
+                                right: metric.value < 0 ? "50%" : undefined,
+                                width: `${Math.min(Math.abs(metric.value) / maxMetricValue * 50, 50)}%`,
+                              }}
+                            />
+                          )}
+                        </div>
+                        <div className="flex items-baseline justify-between gap-3 text-sm sm:block sm:text-right">
+                          <span className="font-semibold tabular-nums">{metric.value === null ? "Not set" : formatMoney(metric.value)}</span>
+                          <span className="text-xs text-[#65715e]">{metric.detail}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+            ))}
+          </div>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-screen bg-[#f4f1ea] px-5 py-6 text-[#20251f] sm:px-8 lg:px-12">
@@ -501,7 +615,7 @@ export default function Home() {
               <h2 className="text-lg font-semibold">{currentYear}</h2>
               <button
                 className={`text-xs font-semibold uppercase tracking-[0.12em] ${selectedMonth === "all" ? "text-[#bf5b3f]" : "text-[#65715e]"}`}
-                onClick={() => setSelectedMonth("all")}
+                onClick={() => navigateToMonth("all")}
               >
                 Year
               </button>
@@ -512,7 +626,7 @@ export default function Home() {
                   key={month.key}
                   aria-current={selectedMonth === month.key ? "date" : undefined}
                   className={`min-w-[132px] border px-3 py-2 text-left transition-colors lg:min-w-0 ${selectedMonth === month.key ? "border-[#20251f] bg-[#20251f] text-[#fbfaf7]" : "border-transparent hover:border-[#20251f]/15 hover:bg-[#fbfaf7]"}`}
-                  onClick={() => setSelectedMonth(month.key)}
+                  onClick={() => navigateToMonth(month.key)}
                 >
                   <span className="flex items-center justify-between gap-3 text-sm font-semibold">
                     {month.label}
@@ -525,7 +639,7 @@ export default function Home() {
               <button
                 aria-current={isYearlyExpenseView ? "true" : undefined}
                 className={`min-w-[132px] border px-3 py-2 text-left transition-colors lg:min-w-0 ${isYearlyExpenseView ? "border-[#20251f] bg-[#20251f] text-[#fbfaf7]" : "border-transparent hover:border-[#20251f]/15 hover:bg-[#fbfaf7]"}`}
-                onClick={() => setSelectedMonth("yearly-expenses")}
+                onClick={() => navigateToMonth("yearly-expenses")}
               >
                 <span className="flex items-center justify-between gap-3 text-sm font-semibold">
                   <span>Taxes and Others</span>
@@ -539,9 +653,9 @@ export default function Home() {
           <div className="min-w-0">
             <header className="flex flex-wrap items-end justify-between gap-5 border-b border-[#20251f]/15 pb-6">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.28em] text-[#65715e]">
+                <Link href="/overall" className="text-xs font-semibold uppercase tracking-[0.28em] text-[#65715e] hover:text-[#bf5b3f]">
                   Financials
-                </p>
+                </Link>
                 <h1 className="mt-2 text-3xl font-semibold tracking-tight">
                   Budget & savings
                 </h1>
@@ -587,7 +701,7 @@ export default function Home() {
               <Stat
                 label="Savings"
                 value={yearSalary > 0 ? formatMoney(yearSavings) : "-"}
-                detail={yearSalary > 0 ? `From ${formatMoney(yearSalary)} salary` : "Set monthly salaries to track"}
+                detail={yearSalary > 0 ? `After ${formatMoney(yearTotal)} expenses and ${formatMoney(yearlyExpenseTotal)} taxes/other expenses` : "Set monthly salaries to track"}
               />
               <Stat
                 label={isYearlyExpenseView ? "Taxes and Others" : selectedMonth === "all" ? "Year expenses" : `${monthLabel(selectedMonth)} expenses`}
@@ -609,7 +723,7 @@ export default function Home() {
                   </span>
                 </div>
                 <div className="mt-10 grid gap-3 sm:h-48 sm:grid-cols-[minmax(6.5rem,8rem)_minmax(0,1fr)]">
-                  <button type="button" aria-current={isYearlyExpenseView ? "true" : undefined} onClick={() => setSelectedMonth("yearly-expenses")} className={`flex min-w-0 flex-col justify-between border-b border-r border-[#20251f]/15 pb-2 pr-3 text-left ${isYearlyExpenseView ? "text-[#bf5b3f]" : "text-[#20251f] hover:text-[#bf5b3f]"}`}>
+                  <button type="button" aria-current={isYearlyExpenseView ? "true" : undefined} onClick={() => navigateToMonth("yearly-expenses")} className={`flex min-w-0 flex-col justify-between border-b border-r border-[#20251f]/15 pb-2 pr-3 text-left ${isYearlyExpenseView ? "text-[#bf5b3f]" : "text-[#20251f] hover:text-[#bf5b3f]"}`}>
                     <span className="text-[11px] font-semibold text-[#65715e]">Taxes and Others</span>
                     <span className="break-words text-sm font-semibold tabular-nums">{formatMoney(yearlyExpenseTotal)}</span>
                     <span className="text-center text-[11px] text-[#65715e]">{currentYear}</span>
@@ -634,7 +748,7 @@ export default function Home() {
                             />
                           ))}
                         </div>
-                        <button className="truncate text-center text-[11px] text-[#65715e]" onClick={() => setSelectedMonth(item.key)} title={item.label}>
+                        <button className="truncate text-center text-[11px] text-[#65715e]" onClick={() => navigateToMonth(item.key)} title={item.label}>
                           {item.shortLabel}
                         </button>
                       </div>
