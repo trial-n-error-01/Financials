@@ -568,37 +568,37 @@ export default function Home() {
           </header>
           <div className="divide-y divide-[#20251f]/20">
             {annualSummaries.map(({ year, annualTotal, transactionCount, metrics }) => (
-                <section className="grid gap-5 py-6 sm:grid-cols-[150px_minmax(0,1fr)] sm:gap-8" key={year}>
-                  <div>
-                    <Link className="text-2xl font-semibold hover:text-[#bf5b3f]" href={`/${year}`}>{year}</Link>
-                    <p className="mt-1 text-sm text-[#65715e]">{formatMoney(annualTotal)}</p>
-                    <p className="text-xs text-[#65715e]">{transactionCount} expenses</p>
-                  </div>
-                  <div aria-label={`${year} annual savings, budget variance, and taxes and other expenses`} className="space-y-4" role="group">
-                    {metrics.map((metric) => (
-                      <div className="grid gap-2 sm:grid-cols-[minmax(120px,0.8fr)_minmax(120px,2fr)_minmax(140px,auto)] sm:items-center sm:gap-4" key={metric.label}>
-                        <p className="text-sm font-semibold">{metric.label}</p>
-                        <div aria-hidden="true" className="relative h-3 bg-[#20251f]/5">
-                          <span className="absolute inset-y-0 left-1/2 w-px bg-[#20251f]/35" />
-                          {metric.value !== null && metric.value !== 0 && (
-                            <span
-                              className={`absolute top-0.5 h-2 ${metric.color}`}
-                              style={{
-                                left: metric.value > 0 ? "50%" : undefined,
-                                right: metric.value < 0 ? "50%" : undefined,
-                                width: `${Math.min(Math.abs(metric.value) / maxMetricValue * 50, 50)}%`,
-                              }}
-                            />
-                          )}
-                        </div>
-                        <div className="flex items-baseline justify-between gap-3 text-sm sm:block sm:text-right">
-                          <span className="font-semibold tabular-nums">{metric.value === null ? "Not set" : formatMoney(metric.value)}</span>
-                          <span className="text-xs text-[#65715e]">{metric.detail}</span>
-                        </div>
+              <section className="grid gap-5 py-6 sm:grid-cols-[150px_minmax(0,1fr)] sm:gap-8" key={year}>
+                <div>
+                  <Link className="text-2xl font-semibold hover:text-[#bf5b3f]" href={`/${year}`}>{year}</Link>
+                  <p className="mt-1 text-sm text-[#65715e]">{formatMoney(annualTotal)}</p>
+                  <p className="text-xs text-[#65715e]">{transactionCount} expenses</p>
+                </div>
+                <div aria-label={`${year} annual savings, budget variance, and taxes and other expenses`} className="space-y-4" role="group">
+                  {metrics.map((metric) => (
+                    <div className="grid gap-2 sm:grid-cols-[minmax(120px,0.8fr)_minmax(120px,2fr)_minmax(140px,auto)] sm:items-center sm:gap-4" key={metric.label}>
+                      <p className="text-sm font-semibold">{metric.label}</p>
+                      <div aria-hidden="true" className="relative h-3 bg-[#20251f]/5">
+                        <span className="absolute inset-y-0 left-1/2 w-px bg-[#20251f]/35" />
+                        {metric.value !== null && metric.value !== 0 && (
+                          <span
+                            className={`absolute top-0.5 h-2 ${metric.color}`}
+                            style={{
+                              left: metric.value > 0 ? "50%" : undefined,
+                              right: metric.value < 0 ? "50%" : undefined,
+                              width: `${Math.min(Math.abs(metric.value) / maxMetricValue * 50, 50)}%`,
+                            }}
+                          />
+                        )}
                       </div>
-                    ))}
-                  </div>
-                </section>
+                      <div className="flex items-baseline justify-between gap-3 text-sm sm:block sm:text-right">
+                        <span className="font-semibold tabular-nums">{metric.value === null ? "Not set" : formatMoney(metric.value)}</span>
+                        <span className="text-xs text-[#65715e]">{metric.detail}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
             ))}
           </div>
         </div>
