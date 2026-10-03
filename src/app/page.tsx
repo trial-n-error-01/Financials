@@ -25,6 +25,12 @@ type MonthlyPlan = {
   budgetCents: number;
 };
 
+type YearlyExpenseEntry = {
+  id: string;
+  name: string;
+  amountCents: number;
+};
+
 type ImportRow = Omit<Transaction, "id" | "userId">;
 type SortKey = "date" | "merchant" | "category" | "paymentMethod" | "amountCents";
 
@@ -41,8 +47,21 @@ const formatMoney = (hkdCents: number) => money.format(hkdCents / 100);
 const monthKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 const monthLabel = (key: string) => key === "all" ? "All months" : new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric" }).format(new Date(`${key}-01T12:00:00`));
 
+function parseYearlyExpenseCache(value: string): Record<string, YearlyExpenseEntry[]> {
+  const cached = JSON.parse(value) as Record<string, unknown>;
+  const expenses: Record<string, YearlyExpenseEntry[]> = {};
+  Object.entries(cached).forEach(([year, entries]) => {
+    if (Array.isArray(entries)) {
+      expenses[year] = entries as YearlyExpenseEntry[];
+    } else if (typeof entries === "number") {
+      expenses[year] = [{ id: `legacy-${year}`, name: "Existing yearly expense", amountCents: entries }];
+    }
+  });
+  return expenses;
+}
+
 function Stat({ label, value, detail }: { label: string; value: string; detail: string }) {
-  return <div className="border-l-2 border-[#bf5b3f] pl-4"><p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#65715e]">{label}</p><p className="mt-2 text-3xl font-semibold tracking-tight">{value}</p><p className="mt-1 text-sm text-[#65715e]">{detail}</p></div>;
+  return <div className="min-w-0 border-l-2 border-[#bf5b3f] pl-4"><p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#65715e]">{label}</p><p className="mt-2 break-words text-2xl font-semibold tracking-tight sm:text-3xl">{value}</p><p className="mt-1 text-sm text-[#65715e]">{detail}</p></div>;
 }
 
 function EmptyState({ onAdd }: { onAdd: () => void }) {
@@ -53,6 +72,13 @@ export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [transactions, setTransactions] = useState<Transaction[]>(firebaseConfigured ? [] : demoTransactions);
   const [monthlyPlans, setMonthlyPlans] = useState<MonthlyPlan[]>([]);
+  const [yearlyExpenses, setYearlyExpenses] = useState<Record<string, YearlyExpenseEntry[]>>({});
+  const [yearlyExpenseName, setYearlyExpenseName] = useState("");
+  const [yearlyExpenseAmount, setYearlyExpenseAmount] = useState("");
+  const [yearlyExpenseError, setYearlyExpenseError] = useState("");
+  const [yearlyExpenseMessage, setYearlyExpenseMessage] = useState("");
+  const [savingYearlyExpense, setSavingYearlyExpense] = useState(false);
+  const [removingYearlyExpense, setRemovingYearlyExpense] = useState("");
   const [planDrafts, setPlanDrafts] = useState<Record<string, { salary: string; budget: string }>>({});
   const [planLoadError, setPlanLoadError] = useState("");
   const [planSaveError, setPlanSaveError] = useState("");
@@ -151,6 +177,49 @@ export default function Home() {
   }, [user]);
 
   useEffect(() => {
+    const cacheKey = `financials:yearly-expenses:${user?.uid ?? "demo"}`;
+    if (!db || !user) {
+      if (firebaseConfigured) return;
+      const cachedExpenses = window.localStorage.getItem(cacheKey);
+      if (cachedExpenses) {
+        try {
+          startTransition(() => setYearlyExpenses(parseYearlyExpenseCache(cachedExpenses)));
+        } catch {
+          window.localStorage.removeItem(cacheKey);
+        }
+      }
+      return;
+    }
+
+    const cachedExpenses = window.localStorage.getItem(cacheKey);
+    if (cachedExpenses) {
+      try {
+        startTransition(() => setYearlyExpenses(parseYearlyExpenseCache(cachedExpenses)));
+      } catch {
+        window.localStorage.removeItem(cacheKey);
+      }
+    }
+    const expensesQuery = query(collection(db, "yearlyExpenses"), where("userId", "==", user.uid));
+    return onSnapshot(expensesQuery, (snapshot) => {
+      const expenses: Record<string, YearlyExpenseEntry[]> = {};
+      snapshot.docs.forEach((item) => {
+        const expense = item.data();
+        const year = String(expense.year);
+        expenses[year] = Array.isArray(expense.expenses)
+          ? expense.expenses as YearlyExpenseEntry[]
+          : typeof expense.amountCents === "number"
+            ? [{ id: "legacy", name: "Existing yearly expense", amountCents: expense.amountCents }]
+            : [];
+      });
+      setYearlyExpenses(expenses);
+      window.localStorage.setItem(cacheKey, JSON.stringify(expenses));
+      setYearlyExpenseError("");
+    }, (error) => {
+      setYearlyExpenseError(`Could not load yearly expenses: ${error.message}`);
+    });
+  }, [user]);
+
+  useEffect(() => {
     if (!db || !user) return;
     const cacheKey = `financials:categories:${user.uid}`;
     const cachedCategories = window.localStorage.getItem(cacheKey);
@@ -176,6 +245,8 @@ export default function Home() {
   const categories = useMemo(() => [...new Set(userCategories)].sort(), [userCategories]);
 
   const currentYear = new Date().getFullYear();
+  const currentYearExpenseEntries = yearlyExpenses[String(currentYear)] ?? [];
+  const yearlyExpenseTotal = currentYearExpenseEntries.reduce((total, expense) => total + expense.amountCents, 0);
   const yearMonths = useMemo(() => Array.from({ length: 12 }, (_, index) => {
     const key = `${currentYear}-${String(index + 1).padStart(2, "0")}`;
     const monthlyTransactions = transactions.filter((transaction) => transaction.date.startsWith(key));
@@ -198,13 +269,14 @@ export default function Home() {
   }), [currentYear, monthlyPlans, transactions]);
   const yearTransactions = transactions.filter((transaction) => transaction.date.startsWith(`${currentYear}-`));
   const selectedMonthPlan = yearMonths.find((item) => item.key === selectedMonth);
+  const isYearlyExpenseView = selectedMonth === "yearly-expenses";
   const selectedDraft = planDrafts[selectedMonth] ?? {
     salary: selectedMonthPlan?.salaryCents ? String(selectedMonthPlan.salaryCents / 100) : "",
     budget: selectedMonthPlan?.budgetCents ? String(selectedMonthPlan.budgetCents / 100) : "",
   };
-  const monthTransactions = transactions.filter((transaction) => selectedMonth === "all"
+  const monthTransactions = useMemo(() => isYearlyExpenseView ? [] : transactions.filter((transaction) => selectedMonth === "all"
     ? transaction.date.startsWith(`${currentYear}-`)
-    : transaction.date.startsWith(selectedMonth));
+    : transaction.date.startsWith(selectedMonth)), [currentYear, isYearlyExpenseView, selectedMonth, transactions]);
   const filteredTransactions = useMemo(() => monthTransactions.filter((transaction) => {
     const normalizedSearch = searchTerm.trim().toLowerCase();
     const matchesSearch = !normalizedSearch || [transaction.merchant, transaction.category, transaction.paymentMethod, transaction.notes].some((value) => value.toLowerCase().includes(normalizedSearch));
@@ -225,7 +297,6 @@ export default function Home() {
   const yearOverBudget = yearMonths.reduce((total, item) => total + item.overBudgetCents, 0);
   const yearSavings = yearSalary - yearTotal;
   const maxYearValue = Math.max(...yearMonths.flatMap((item) => [item.total, item.budgetCents, Math.abs(item.savingsCents)]), 1);
-
   const saveMonthlyPlan = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (selectedMonth === "all") return;
@@ -260,6 +331,69 @@ export default function Home() {
       setPlanSaveError(error instanceof Error ? error.message : "Could not save this monthly plan.");
     } finally {
       setSavingPlan(false);
+    }
+  };
+
+  const saveYearlyExpenseEntries = async (expenses: YearlyExpenseEntry[]) => {
+    if (firebaseConfigured && (!db || !user)) {
+      throw new Error("Sign in before saving yearly expenses.");
+    }
+
+    if (db && user) {
+      await setDoc(doc(db, "yearlyExpenses", `${user.uid}_${currentYear}`), {
+        userId: user.uid,
+        year: currentYear,
+        expenses,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    const nextExpenses = { ...yearlyExpenses, [String(currentYear)]: expenses };
+    const cacheKey = `financials:yearly-expenses:${user?.uid ?? "demo"}`;
+    setYearlyExpenses(nextExpenses);
+    window.localStorage.setItem(cacheKey, JSON.stringify(nextExpenses));
+  };
+
+  const saveYearlyExpense = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const name = yearlyExpenseName.trim();
+    const amount = Number(yearlyExpenseAmount);
+    if (!name || !yearlyExpenseAmount.trim() || !Number.isFinite(amount) || amount < 0) {
+      setYearlyExpenseError("Enter an expense name and a valid non-negative amount.");
+      setYearlyExpenseMessage("");
+      return;
+    }
+
+    setSavingYearlyExpense(true);
+    setYearlyExpenseError("");
+    setYearlyExpenseMessage("");
+    try {
+      await saveYearlyExpenseEntries([...currentYearExpenseEntries, {
+        id: crypto.randomUUID(),
+        name,
+        amountCents: Math.round(amount * 100),
+      }]);
+      setYearlyExpenseName("");
+      setYearlyExpenseAmount("");
+      setYearlyExpenseMessage("Expense added.");
+    } catch (error) {
+      setYearlyExpenseError(error instanceof Error ? error.message : "Could not save yearly expenses.");
+    } finally {
+      setSavingYearlyExpense(false);
+    }
+  };
+
+  const removeYearlyExpense = async (id: string) => {
+    setRemovingYearlyExpense(id);
+    setYearlyExpenseError("");
+    setYearlyExpenseMessage("");
+    try {
+      await saveYearlyExpenseEntries(currentYearExpenseEntries.filter((expense) => expense.id !== id));
+      setYearlyExpenseMessage("Expense removed.");
+    } catch (error) {
+      setYearlyExpenseError(error instanceof Error ? error.message : "Could not remove this expense.");
+    } finally {
+      setRemovingYearlyExpense("");
     }
   };
 
@@ -372,7 +506,7 @@ export default function Home() {
                 Year
               </button>
             </div>
-            <nav aria-label={`${currentYear} months`} className="flex gap-2 overflow-x-auto pb-2 lg:flex-col lg:gap-1 lg:overflow-visible lg:pb-0">
+            <nav aria-label={`${currentYear} budget periods`} className="flex gap-2 overflow-x-auto pb-2 lg:flex-col lg:gap-1 lg:overflow-visible lg:pb-0">
               {yearMonths.map((month) => (
                 <button
                   key={month.key}
@@ -388,6 +522,18 @@ export default function Home() {
                   </span>
                 </button>
               ))}
+              <button
+                aria-current={isYearlyExpenseView ? "true" : undefined}
+                className={`min-w-[132px] border px-3 py-2 text-left transition-colors lg:min-w-0 ${isYearlyExpenseView ? "border-[#20251f] bg-[#20251f] text-[#fbfaf7]" : "border-transparent hover:border-[#20251f]/15 hover:bg-[#fbfaf7]"}`}
+                onClick={() => setSelectedMonth("yearly-expenses")}
+              >
+                <span className="flex items-center justify-between gap-3 text-sm font-semibold">
+                  <span>Taxes and Others</span>
+                  <span className={`text-xs font-normal ${isYearlyExpenseView ? "text-[#fbfaf7]/70" : "text-[#65715e]"}`}>
+                    {formatMoney(yearlyExpenseTotal)}
+                  </span>
+                </span>
+              </button>
             </nav>
           </aside>
           <div className="min-w-0">
@@ -427,7 +573,7 @@ export default function Home() {
                 </button>
               </div>
             </header>
-            <div className="grid gap-5 py-7 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid gap-5 py-7 sm:grid-cols-2 2xl:grid-cols-4">
               <Stat
                 label="Expenses this year"
                 value={formatMoney(yearTotal)}
@@ -444,12 +590,12 @@ export default function Home() {
                 detail={yearSalary > 0 ? `From ${formatMoney(yearSalary)} salary` : "Set monthly salaries to track"}
               />
               <Stat
-                label={selectedMonth === "all" ? "Year expenses" : `${monthLabel(selectedMonth)} expenses`}
-                value={formatMoney(monthTotal)}
-                detail={`${monthTransactions.length} transactions`}
+                label={isYearlyExpenseView ? "Taxes and Others" : selectedMonth === "all" ? "Year expenses" : `${monthLabel(selectedMonth)} expenses`}
+                value={formatMoney(isYearlyExpenseView ? yearlyExpenseTotal : monthTotal)}
+                detail={isYearlyExpenseView ? `${currentYear} annual expenses` : `${monthTransactions.length} transactions`}
               />
             </div>
-            <section className="grid gap-5 lg:grid-cols-[1.35fr_0.65fr]">
+            <section className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.85fr)]">
               <div className="border border-[#20251f]/15 bg-[#fbfaf7] p-5 sm:p-7">
                 <div className="flex items-start justify-between">
                   <div>
@@ -462,31 +608,38 @@ export default function Home() {
                     {formatMoney(yearTotal)} year to date
                   </span>
                 </div>
-                <div role="group" aria-label={`Monthly budget, spending and savings for ${currentYear}`} className="mt-10 grid h-48 grid-cols-6 items-end gap-3 border-b border-[#20251f]/15 sm:grid-cols-12 sm:gap-2">
-                  {yearMonths.map((item) => (
-                    <div
-                      className="flex h-full min-w-0 flex-col justify-end gap-2"
-                      key={item.key}
-                    >
-                      <div className="flex h-full w-full items-end justify-center gap-0.5">
-                        {[
-                          { label: "Budget", value: item.budgetCents, color: "bg-[#b8c6ae]" },
-                          { label: "Spent", value: item.total, color: item.overBudgetCents > 0 ? "bg-[#bf5b3f]" : "bg-[#65715e]" },
-                          { label: "Savings", value: item.savingsCents, color: item.savingsCents >= 0 ? "bg-[#4f8271]" : "bg-[#bf5b3f]" },
-                        ].map((series) => (
-                          <div
-                            key={series.label}
-                            className={`w-1/3 ${series.color} ${item.key === selectedMonth ? "opacity-100" : "opacity-75"}`}
-                            style={{ height: `${Math.max((Math.abs(series.value) / maxYearValue) * 100, series.value ? 5 : 1)}%` }}
-                            title={`${item.label} ${series.label.toLowerCase()}: ${formatMoney(series.value)}`}
-                          />
-                        ))}
+                <div className="mt-10 grid gap-3 sm:h-48 sm:grid-cols-[minmax(6.5rem,8rem)_minmax(0,1fr)]">
+                  <button type="button" aria-current={isYearlyExpenseView ? "true" : undefined} onClick={() => setSelectedMonth("yearly-expenses")} className={`flex min-w-0 flex-col justify-between border-b border-r border-[#20251f]/15 pb-2 pr-3 text-left ${isYearlyExpenseView ? "text-[#bf5b3f]" : "text-[#20251f] hover:text-[#bf5b3f]"}`}>
+                    <span className="text-[11px] font-semibold text-[#65715e]">Taxes and Others</span>
+                    <span className="break-words text-sm font-semibold tabular-nums">{formatMoney(yearlyExpenseTotal)}</span>
+                    <span className="text-center text-[11px] text-[#65715e]">{currentYear}</span>
+                  </button>
+                  <div role="group" aria-label={`Monthly budget, spending and savings for ${currentYear}`} className="grid h-48 grid-cols-6 items-end gap-3 border-b border-[#20251f]/15 sm:grid-cols-12 sm:gap-2">
+                    {yearMonths.map((item) => (
+                      <div
+                        className="flex h-full min-w-0 flex-col justify-end gap-2"
+                        key={item.key}
+                      >
+                        <div className="flex h-full w-full items-end justify-center gap-0.5">
+                          {[
+                            { label: "Budget", value: item.budgetCents, color: "bg-[#b8c6ae]" },
+                            { label: "Spent", value: item.total, color: item.overBudgetCents > 0 ? "bg-[#bf5b3f]" : "bg-[#65715e]" },
+                            { label: "Savings", value: item.savingsCents, color: item.savingsCents >= 0 ? "bg-[#4f8271]" : "bg-[#bf5b3f]" },
+                          ].map((series) => (
+                            <div
+                              key={series.label}
+                              className={`w-1/3 ${series.color} ${item.key === selectedMonth ? "opacity-100" : "opacity-75"}`}
+                              style={{ height: `${Math.max((Math.abs(series.value) / maxYearValue) * 100, series.value ? 5 : 1)}%` }}
+                              title={`${item.label} ${series.label.toLowerCase()}: ${formatMoney(series.value)}`}
+                            />
+                          ))}
+                        </div>
+                        <button className="truncate text-center text-[11px] text-[#65715e]" onClick={() => setSelectedMonth(item.key)} title={item.label}>
+                          {item.shortLabel}
+                        </button>
                       </div>
-                      <button className="truncate text-center text-[11px] text-[#65715e]" onClick={() => setSelectedMonth(item.key)} title={item.label}>
-                        {item.shortLabel}
-                      </button>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
                 <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-xs text-[#65715e]">
                   <span><span className="mr-2 inline-block size-2 bg-[#b8c6ae]" />Budget</span>
@@ -497,10 +650,51 @@ export default function Home() {
               </div>
               <div className="border border-[#20251f]/15 bg-[#fbfaf7] p-5 sm:p-7">
                 <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#65715e]">
-                  Monthly plan
+                  {isYearlyExpenseView ? "Yearly expenses" : "Monthly plan"}
                 </p>
-                <h2 className="mt-2 text-2xl font-semibold">{selectedMonthPlan?.label ?? "Choose a month"}</h2>
-                {selectedMonthPlan ? (
+                <h2 className="mt-2 text-2xl font-semibold">{isYearlyExpenseView ? "Taxes and Others" : selectedMonthPlan?.label ?? "Choose a month"}</h2>
+                {isYearlyExpenseView ? (
+                  <div className="mt-5">
+                    <form className="space-y-4" onSubmit={saveYearlyExpense}>
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <label className="block text-sm font-semibold" htmlFor="yearly-expense-name">
+                          Expense
+                          <input id="yearly-expense-name" className="mt-2 w-full border border-[#20251f]/15 bg-transparent px-3 py-2 font-normal" type="text" placeholder="Tax payment, rental deposit..." value={yearlyExpenseName} onChange={(event) => setYearlyExpenseName(event.target.value)} required />
+                        </label>
+                        <label className="block text-sm font-semibold" htmlFor="yearly-expense-amount">
+                          Amount
+                          <span className="mt-1 block text-xs font-normal text-[#65715e]">HKD for {currentYear}</span>
+                          <input id="yearly-expense-amount" className="mt-2 w-full border border-[#20251f]/15 bg-transparent px-3 py-2 font-normal" type="number" min="0" step="0.01" inputMode="decimal" placeholder="0.00" value={yearlyExpenseAmount} onChange={(event) => setYearlyExpenseAmount(event.target.value)} required />
+                        </label>
+                      </div>
+                      <button className="w-full bg-[#20251f] px-4 py-3 text-sm font-semibold text-[#fbfaf7] disabled:opacity-50" type="submit" disabled={savingYearlyExpense}>
+                        {savingYearlyExpense ? "Adding..." : "Add expense"}
+                      </button>
+                    </form>
+                    {yearlyExpenseMessage && <p className="mt-3 text-sm text-[#4f8271]">{yearlyExpenseMessage}</p>}
+                    {yearlyExpenseError && <p className="mt-3 text-sm text-[#bf5b3f]">{yearlyExpenseError}</p>}
+                    <div className="mt-6 border-t border-[#20251f]/15 pt-5">
+                      <div className="flex items-baseline justify-between gap-4">
+                        <p className="text-sm text-[#65715e]">Total for {currentYear}</p>
+                        <p className="font-semibold tabular-nums">{formatMoney(yearlyExpenseTotal)}</p>
+                      </div>
+                      <div className="mt-4 space-y-3">
+                        {currentYearExpenseEntries.map((expense) => (
+                          <div className="flex items-center justify-between gap-4 border-b border-[#20251f]/10 pb-3" key={expense.id}>
+                            <div className="min-w-0">
+                              <p className="break-words text-sm font-semibold">{expense.name}</p>
+                              <p className="mt-1 text-sm tabular-nums">{formatMoney(expense.amountCents)}</p>
+                            </div>
+                            <button className="shrink-0 text-xs font-semibold text-[#bf5b3f] disabled:opacity-50" type="button" onClick={() => void removeYearlyExpense(expense.id)} disabled={Boolean(removingYearlyExpense)}>
+                              {removingYearlyExpense === expense.id ? "Removing..." : "Remove"}
+                            </button>
+                          </div>
+                        ))}
+                        {currentYearExpenseEntries.length === 0 && <p className="text-sm text-[#65715e]">No yearly expenses added.</p>}
+                      </div>
+                    </div>
+                  </div>
+                ) : selectedMonthPlan ? (
                   <form className="mt-5 space-y-4" onSubmit={saveMonthlyPlan}>
                     <label className="block text-sm font-semibold" htmlFor="monthly-salary">
                       Salary
@@ -519,13 +713,13 @@ export default function Home() {
                     {(planSaveError || planLoadError) && <p className="text-sm text-[#bf5b3f]">{planSaveError || planLoadError}</p>}
                   </form>
                 ) : (
-                  <p className="mt-5 text-sm text-[#65715e]">Select a month in the sidebar to enter its salary and budget.</p>
+                  <p className="mt-5 text-sm text-[#65715e]">Select a month or Taxes and Others in the sidebar to edit its plan.</p>
                 )}
                 {selectedMonthPlan && (
-                  <div className="mt-6 grid grid-cols-3 gap-3 border-t border-[#20251f]/15 pt-5 text-sm">
-                    <div><p className="text-xs text-[#65715e]">Spent</p><p className="mt-1 font-semibold">{formatMoney(selectedMonthPlan.total)}</p></div>
-                    <div><p className="text-xs text-[#65715e]">Over budget</p><p className="mt-1 font-semibold">{selectedMonthPlan.overBudgetCents ? formatMoney(selectedMonthPlan.overBudgetCents) : formatMoney(0)}</p></div>
-                    <div><p className="text-xs text-[#65715e]">Savings</p><p className="mt-1 font-semibold">{selectedMonthPlan.salaryCents ? formatMoney(selectedMonthPlan.savingsCents) : "-"}</p></div>
+                  <div className="mt-6 space-y-3 border-t border-[#20251f]/15 pt-5 text-sm">
+                    <div className="flex items-baseline justify-between gap-4"><p className="text-[#65715e]">Spent</p><p className="text-right font-semibold tabular-nums">{formatMoney(selectedMonthPlan.total)}</p></div>
+                    <div className="flex items-baseline justify-between gap-4"><p className="text-[#65715e]">Over budget</p><p className="text-right font-semibold tabular-nums">{selectedMonthPlan.overBudgetCents ? formatMoney(selectedMonthPlan.overBudgetCents) : formatMoney(0)}</p></div>
+                    <div className="flex items-baseline justify-between gap-4"><p className="text-[#65715e]">Savings</p><p className="text-right font-semibold tabular-nums">{selectedMonthPlan.salaryCents ? formatMoney(selectedMonthPlan.savingsCents) : "-"}</p></div>
                   </div>
                 )}
               </div>
