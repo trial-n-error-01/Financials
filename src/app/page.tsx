@@ -45,9 +45,12 @@ const demoTransactions: Transaction[] = [
 ];
 
 const money = new Intl.NumberFormat("en-HK", { style: "currency", currency: "HKD" });
+const chartMoney = new Intl.NumberFormat("en-HK", { style: "currency", currency: "HKD", maximumFractionDigits: 0 });
 const formatMoney = (hkdCents: number) => money.format(hkdCents / 100);
+const formatChartMoney = (hkdCents: number) => chartMoney.format(hkdCents / 100);
 const monthLabel = (key: string) => key === "all" ? "All months" : new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric" }).format(new Date(`${key}-01T12:00:00`));
 const monthNames = Array.from({ length: 12 }, (_, index) => new Intl.DateTimeFormat("en-GB", { month: "long" }).format(new Date(2026, index, 1)).toLowerCase());
+const categoryChartColors = ["#bf5b3f", "#4f8271", "#d39b45", "#6478a6", "#9a6586", "#71833c", "#478a9e", "#ce7757"];
 
 function parseYearlyExpenseCache(value: string): Record<string, YearlyExpenseEntry[]> {
   const cached = JSON.parse(value) as Record<string, unknown>;
@@ -78,6 +81,7 @@ export default function Home() {
   const routeMonthIndex = monthNames.indexOf((pathSegments[1] ?? "").toLowerCase());
   const isYearlyExpenseRoute = pathSegments[1] === "taxes-and-others";
   const isOverallView = pathname === "/overall" || pathname === "/";
+  const isMonthView = Boolean(routeYear && routeMonthIndex >= 0);
   const selectedMonth = isYearlyExpenseRoute
     ? "yearly-expenses"
     : routeYear && routeMonthIndex >= 0
@@ -290,6 +294,7 @@ export default function Home() {
       total,
       count: monthlyTransactions.length,
       budgetCents,
+      budgetVarianceCents: budgetCents > 0 ? budgetCents - total : null,
       salaryCents,
       overBudgetCents: budgetCents > 0 ? Math.max(total - budgetCents, 0) : 0,
       savingsCents: salaryCents > 0 ? salaryCents - total : 0,
@@ -305,6 +310,28 @@ export default function Home() {
   const monthTransactions = useMemo(() => isYearlyExpenseView ? [] : transactions.filter((transaction) => selectedMonth === "all"
     ? transaction.date.startsWith(`${currentYear}-`)
     : transaction.date.startsWith(selectedMonth)), [currentYear, isYearlyExpenseView, selectedMonth, transactions]);
+  const monthCategoryExpenses = useMemo(() => {
+    const categoryTotals = new Map<string, number>();
+    monthTransactions.forEach((transaction) => {
+      const category = transaction.category.trim() || "Uncategorized";
+      categoryTotals.set(category, (categoryTotals.get(category) ?? 0) + transaction.amountCents);
+    });
+    return [...categoryTotals.entries()]
+      .map(([name, amountCents]) => ({ name, amountCents }))
+      .sort((left, right) => right.amountCents - left.amountCents)
+      .map((category, index) => ({ ...category, color: categoryChartColors[index % categoryChartColors.length] }));
+  }, [monthTransactions]);
+  const monthCategoryTotal = monthCategoryExpenses.reduce((total, category) => total + category.amountCents, 0);
+  const pieChartSlices = monthCategoryExpenses.reduce((chart, category) => {
+    const end = chart.offset + (monthCategoryTotal ? category.amountCents / monthCategoryTotal * 100 : 0);
+    return {
+      offset: end,
+      slices: [...chart.slices, `${category.color} ${chart.offset}% ${end}%`],
+    };
+  }, { offset: 0, slices: [] as string[] }).slices;
+  const pieChartBackground = pieChartSlices.length
+    ? `conic-gradient(${pieChartSlices.join(", ")})`
+    : "#e6e3db";
   const filteredTransactions = useMemo(() => monthTransactions.filter((transaction) => {
     const normalizedSearch = searchTerm.trim().toLowerCase();
     const matchesSearch = !normalizedSearch || [transaction.merchant, transaction.category, transaction.paymentMethod, transaction.notes].some((value) => value.toLowerCase().includes(normalizedSearch));
@@ -324,6 +351,18 @@ export default function Home() {
   const yearSalary = yearMonths.reduce((total, item) => total + item.salaryCents, 0);
   const yearOverBudget = yearMonths.reduce((total, item) => total + item.overBudgetCents, 0);
   const yearSavings = yearSalary - yearTotal - yearlyExpenseTotal;
+  const salarySavingsMax = Math.max(1, ...yearMonths.map((item) => item.salaryCents), ...yearMonths.map((item) => item.savingsCents));
+  const salarySavingsMin = Math.min(0, ...yearMonths.map((item) => item.savingsCents));
+  const salarySavingsRange = salarySavingsMax - salarySavingsMin || 1;
+  const yearChartX = (index: number) => 82 + index / (yearMonths.length - 1) * 622;
+  const yearChartY = (value: number) => 18 + (salarySavingsMax - value) / salarySavingsRange * 188;
+  const salaryLinePath = yearMonths.map((item, index) => `${index === 0 ? "M" : "L"} ${yearChartX(index)} ${yearChartY(item.salaryCents)}`).join(" ");
+  const savingsLinePath = yearMonths.map((item, index) => `${index === 0 ? "M" : "L"} ${yearChartX(index)} ${yearChartY(item.savingsCents)}`).join(" ");
+  const salarySavingsTicks = Array.from({ length: 5 }, (_, index) => salarySavingsMax - salarySavingsRange * index / 4);
+  const budgetVarianceMax = Math.max(1, ...yearMonths.map((item) => Math.abs(item.budgetVarianceCents ?? 0)));
+  const monthBudgetVariance = selectedMonthPlan && selectedMonthPlan.budgetCents > 0
+    ? selectedMonthPlan.budgetCents - monthTotal
+    : null;
   const maxYearValue = Math.max(...yearMonths.flatMap((item) => [item.total, item.budgetCents, Math.abs(item.savingsCents)]), 1);
   const saveMonthlyPlan = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -533,6 +572,121 @@ export default function Home() {
     if (match && index >= 0 && index < 12) router.push(`/${match[1]}/${monthNames[index]}`);
   };
 
+  const expenseHistorySection = (
+    <section className={`${isMonthView ? "" : "mt-5"} border border-[#20251f]/15 bg-[#fbfaf7] p-5 sm:p-7`}>
+      <div className="mb-5 flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#65715e]">
+            Expense history
+          </p>
+          <h2 className="mt-2 text-2xl font-semibold">{isMonthView ? `${monthLabel(selectedMonth)} expenses` : "All expenses"}</h2>
+        </div>
+        <span className="text-sm text-[#65715e]">
+          {filteredTransactions.length} shown
+        </span>
+      </div>
+      <div className="mb-5 grid gap-3 sm:grid-cols-[1.5fr_1fr_1fr]">
+        <label className="sr-only" htmlFor="expense-search">
+          Search expenses
+        </label>
+        <input
+          id="expense-search"
+          className="border border-[#20251f]/15 bg-transparent px-3 py-2 text-sm"
+          placeholder="Search merchant, category, notes..."
+          value={searchTerm}
+          onChange={(event) => setSearchTerm(event.target.value)}
+        />
+        <label className="sr-only" htmlFor="category-filter">
+          Filter category
+        </label>
+        <select
+          id="category-filter"
+          className="border border-[#20251f]/15 bg-[#fbfaf7] px-3 py-2 text-sm"
+          value={filterCategory}
+          onChange={(event) => setFilterCategory(event.target.value)}
+        >
+          <option value="">All categories</option>
+          {categories.map((category) => (
+            <option key={category}>{category}</option>
+          ))}
+        </select>
+        <label className="sr-only" htmlFor="payment-filter">
+          Filter payment method
+        </label>
+        <select
+          id="payment-filter"
+          className="border border-[#20251f]/15 bg-[#fbfaf7] px-3 py-2 text-sm"
+          value={filterPaymentMethod}
+          onChange={(event) => setFilterPaymentMethod(event.target.value)}
+        >
+          <option value="">All payment methods</option>
+          {paymentMethods.map((method) => (
+            <option key={method}>{method}</option>
+          ))}
+        </select>
+      </div>
+      {filteredTransactions.length ? (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[680px] text-left text-sm">
+            <thead className="border-b border-[#20251f]/15 text-xs uppercase tracking-[0.12em] text-[#65715e]">
+              <tr>
+                <th className="pb-3 font-semibold">
+                  <button onClick={() => changeSort("date")}>Date{sortIndicator("date")}</button>
+                </th>
+                <th className="pb-3 font-semibold">
+                  <button onClick={() => changeSort("merchant")}>Merchant{sortIndicator("merchant")}</button>
+                </th>
+                <th className="pb-3 font-semibold">
+                  <button onClick={() => changeSort("category")}>Category{sortIndicator("category")}</button>
+                </th>
+                <th className="pb-3 font-semibold">
+                  <button onClick={() => changeSort("paymentMethod")}>Payment{sortIndicator("paymentMethod")}</button>
+                </th>
+                <th className="pb-3 text-right font-semibold">
+                  <button onClick={() => changeSort("amountCents")}>Amount{sortIndicator("amountCents")}</button>
+                </th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {sortedFilteredTransactions.map((transaction) => (
+                <tr className="border-b border-[#20251f]/10 last:border-0" key={transaction.id}>
+                  <td className="py-4 text-[#65715e]">{transaction.date}</td>
+                  <td className="py-4 font-semibold">{transaction.merchant}</td>
+                  <td className="py-4">
+                    <span className="border border-[#20251f]/15 px-2 py-1 text-xs">{transaction.category}</span>
+                  </td>
+                  <td className="py-4 text-[#65715e]">{transaction.paymentMethod}</td>
+                  <td className="py-4 text-right font-semibold">{formatMoney(transaction.amountCents)}</td>
+                  <td className="py-4 text-right">
+                    <button
+                      className="mr-3 text-xs text-[#65715e]"
+                      onClick={() => {
+                        setEditingTransaction(transaction);
+                        setShowForm(true);
+                      }}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      className="text-xs text-[#bf5b3f]"
+                      onClick={() => void removeTransaction(transaction.id)}
+                      disabled={deletingId === transaction.id}
+                    >
+                      {deletingId === transaction.id ? "Removing" : "Remove"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <EmptyState onAdd={() => setShowForm(true)} />
+      )}
+    </section>
+  );
+
   if (isOverallView) {
     const availableYears = [...new Set([
       ...transactions.map((transaction) => transaction.date.slice(0, 4)),
@@ -593,7 +747,7 @@ export default function Home() {
                       </div>
                       <div className="flex items-baseline justify-between gap-3 text-sm sm:block sm:text-right">
                         <span className="font-semibold tabular-nums">{metric.value === null ? "Not set" : formatMoney(metric.value)}</span>
-                        <span className="text-xs text-[#65715e]">{metric.detail}</span>
+                        <span className="text-xs text-[#65715e] sm:ml-2">{metric.detail}</span>
                       </div>
                     </div>
                   ))}
@@ -609,7 +763,7 @@ export default function Home() {
   return (
     <main className="min-h-screen bg-[#f4f1ea] px-5 py-6 text-[#20251f] sm:px-8 lg:px-12">
       <div className="mx-auto max-w-[1440px]">
-        <div className="grid gap-8 lg:grid-cols-[230px_minmax(0,1fr)]">
+        <div className="grid grid-cols-1 gap-8 lg:grid-cols-[230px_minmax(0,1fr)]">
           <aside className="border-b border-[#20251f]/15 pb-5 lg:sticky lg:top-6 lg:h-[calc(100vh-3rem)] lg:self-start lg:overflow-y-auto lg:border-b-0 lg:border-r lg:pb-0 lg:pr-6">
             <div className="mb-4 flex items-baseline justify-between">
               <h2 className="text-lg font-semibold">{currentYear}</h2>
@@ -636,18 +790,20 @@ export default function Home() {
                   </span>
                 </button>
               ))}
-              <button
-                aria-current={isYearlyExpenseView ? "true" : undefined}
-                className={`min-w-[132px] border px-3 py-2 text-left transition-colors lg:min-w-0 ${isYearlyExpenseView ? "border-[#20251f] bg-[#20251f] text-[#fbfaf7]" : "border-transparent hover:border-[#20251f]/15 hover:bg-[#fbfaf7]"}`}
-                onClick={() => navigateToMonth("yearly-expenses")}
-              >
-                <span className="flex items-center justify-between gap-3 text-sm font-semibold">
-                  <span>Taxes and Others</span>
-                  <span className={`text-xs font-normal ${isYearlyExpenseView ? "text-[#fbfaf7]/70" : "text-[#65715e]"}`}>
-                    {formatMoney(yearlyExpenseTotal)}
+              {!isMonthView && (
+                <button
+                  aria-current={isYearlyExpenseView ? "true" : undefined}
+                  className={`min-w-[132px] border px-3 py-2 text-left transition-colors lg:min-w-0 ${isYearlyExpenseView ? "border-[#20251f] bg-[#20251f] text-[#fbfaf7]" : "border-transparent hover:border-[#20251f]/15 hover:bg-[#fbfaf7]"}`}
+                  onClick={() => navigateToMonth("yearly-expenses")}
+                >
+                  <span className="flex items-center justify-between gap-3 text-sm font-semibold">
+                    <span>Taxes and Others</span>
+                    <span className={`text-xs font-normal ${isYearlyExpenseView ? "text-[#fbfaf7]/70" : "text-[#65715e]"}`}>
+                      {formatMoney(yearlyExpenseTotal)}
+                    </span>
                   </span>
-                </span>
-              </button>
+                </button>
+              )}
             </nav>
           </aside>
           <div className="min-w-0">
@@ -657,16 +813,18 @@ export default function Home() {
                   Financials
                 </Link>
                 <h1 className="mt-2 text-3xl font-semibold tracking-tight">
-                  Budget & savings
+                  {isMonthView ? monthLabel(selectedMonth) : isYearlyExpenseView ? "Taxes and Others" : "Budget & savings"}
                 </h1>
               </div>
               <div className="flex flex-wrap items-center gap-3">
-                <button
-                  className="border border-[#20251f]/20 px-4 py-2 text-sm font-semibold"
-                  onClick={() => setShowExpenseHistory((shown) => !shown)}
-                >
-                  {showExpenseHistory ? "Hide expense history" : "Expense history"}
-                </button>
+                {!isMonthView && (
+                  <button
+                    className="border border-[#20251f]/20 px-4 py-2 text-sm font-semibold"
+                    onClick={() => setShowExpenseHistory((shown) => !shown)}
+                  >
+                    {showExpenseHistory ? "Hide expense history" : "Expense history"}
+                  </button>
+                )}
                 <button
                   className="border border-[#20251f]/20 px-4 py-2 text-sm font-semibold"
                   onClick={() => setShowCategories(true)}
@@ -687,30 +845,157 @@ export default function Home() {
                 </button>
               </div>
             </header>
-            <div className="grid gap-5 py-7 sm:grid-cols-2 2xl:grid-cols-4">
-              <Stat
-                label="Expenses this year"
-                value={formatMoney(yearTotal)}
-                detail={`${yearTransactions.length} transactions this year`}
-              />
-              <Stat
-                label="Over budget"
-                value={yearBudget > 0 ? formatMoney(yearOverBudget) : "-"}
-                detail={yearBudget > 0 ? `Across ${currentYear}` : "Set monthly budgets to compare"}
-              />
-              <Stat
-                label="Savings"
-                value={yearSalary > 0 ? formatMoney(yearSavings) : "-"}
-                detail={yearSalary > 0 ? `After ${formatMoney(yearTotal)} expenses and ${formatMoney(yearlyExpenseTotal)} taxes/other expenses` : "Set monthly salaries to track"}
-              />
-              <Stat
-                label={isYearlyExpenseView ? "Taxes and Others" : selectedMonth === "all" ? "Year expenses" : `${monthLabel(selectedMonth)} expenses`}
-                value={formatMoney(isYearlyExpenseView ? yearlyExpenseTotal : monthTotal)}
-                detail={isYearlyExpenseView ? `${currentYear} annual expenses` : `${monthTransactions.length} transactions`}
-              />
+            <div className={`grid gap-5 py-7 sm:grid-cols-2 ${isMonthView ? "2xl:grid-cols-2" : "2xl:grid-cols-4"}`}>
+              {isMonthView ? (
+                <>
+                  <Stat label="Expenses this month" value={formatMoney(monthTotal)} detail={`${monthTransactions.length} transactions`} />
+                  <Stat
+                    label="Budget variance"
+                    value={monthBudgetVariance === null ? "Not set" : formatMoney(monthBudgetVariance)}
+                    detail={monthBudgetVariance === null ? "Set a monthly budget to compare" : monthBudgetVariance < 0 ? "Over budget" : monthBudgetVariance > 0 ? "Under budget" : "On budget"}
+                  />
+                </>
+              ) : (
+                <>
+                  <Stat
+                    label="Expenses this year"
+                    value={formatMoney(yearTotal)}
+                    detail={`${yearTransactions.length} transactions this year`}
+                  />
+                  <Stat
+                    label="Over budget"
+                    value={yearBudget > 0 ? formatMoney(yearOverBudget) : "-"}
+                    detail={yearBudget > 0 ? `Across ${currentYear}` : "Set monthly budgets to compare"}
+                  />
+                  <Stat
+                    label="Savings"
+                    value={yearSalary > 0 ? formatMoney(yearSavings) : "-"}
+                    detail={yearSalary > 0 ? `After ${formatMoney(yearTotal)} expenses and ${formatMoney(yearlyExpenseTotal)} taxes/other expenses` : "Set monthly salaries to track"}
+                  />
+                  <Stat
+                    label={isYearlyExpenseView ? "Taxes and Others" : "Year expenses"}
+                    value={formatMoney(isYearlyExpenseView ? yearlyExpenseTotal : monthTotal)}
+                    detail={isYearlyExpenseView ? `${currentYear} annual expenses` : `${monthTransactions.length} transactions`}
+                  />
+                </>
+              )}
             </div>
-            <section className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.85fr)]">
-              <div className="border border-[#20251f]/15 bg-[#fbfaf7] p-5 sm:p-7">
+            {selectedMonth === "all" && (
+              <section aria-label={`${currentYear} salary and savings charts`} className="mb-5 grid grid-cols-1 gap-5 xl:grid-cols-2">
+                <div className="min-w-0 border border-[#20251f]/15 bg-[#fbfaf7] p-5 sm:p-7">
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#65715e]">Monthly movement</p>
+                  <h2 className="mt-2 text-2xl font-semibold">Salary &amp; savings</h2>
+                  <svg className="mt-5 block h-auto w-full max-w-full" width="720" height="270" viewBox="0 0 720 270" role="img" aria-labelledby="salary-savings-chart-title salary-savings-chart-description">
+                    <title id="salary-savings-chart-title">Monthly salary and savings for {currentYear}</title>
+                    <desc id="salary-savings-chart-description">Salary and savings after recorded monthly expenses, shown from January through December.</desc>
+                    {salarySavingsTicks.map((tick, index) => {
+                      const y = yearChartY(tick);
+                      return (
+                        <g key={index}>
+                          <line x1="82" x2="704" y1={y} y2={y} stroke="#20251f" strokeOpacity="0.12" />
+                          <text x="74" y={y + 4} textAnchor="end" fill="#65715e" fontSize="10">{formatChartMoney(tick)}</text>
+                        </g>
+                      );
+                    })}
+                    <path d={salaryLinePath} fill="none" stroke="#bf5b3f" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d={savingsLinePath} fill="none" stroke="#4f8271" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+                    {yearMonths.map((item, index) => (
+                      <g key={item.key}>
+                        <circle cx={yearChartX(index)} cy={yearChartY(item.salaryCents)} r="4" fill="#bf5b3f">
+                          <title>{`${item.label} salary: ${formatMoney(item.salaryCents)}`}</title>
+                        </circle>
+                        <circle cx={yearChartX(index)} cy={yearChartY(item.savingsCents)} r="4" fill="#4f8271">
+                          <title>{`${item.label} savings: ${formatMoney(item.savingsCents)}`}</title>
+                        </circle>
+                        <text x={yearChartX(index)} y="238" textAnchor="middle" fill="#65715e" fontSize="11">{item.shortLabel}</text>
+                      </g>
+                    ))}
+                  </svg>
+                  <div className="mt-1 flex flex-wrap gap-x-5 gap-y-2 text-xs text-[#65715e]">
+                    <span><span className="mr-2 inline-block size-2 rounded-full bg-[#bf5b3f]" />Salary</span>
+                    <span><span className="mr-2 inline-block size-2 rounded-full bg-[#4f8271]" />Savings after monthly expenses</span>
+                  </div>
+                </div>
+                <div className="min-w-0 border border-[#20251f]/15 bg-[#fbfaf7] p-5 sm:p-7">
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#65715e]">Budget variance</p>
+                  <h2 className="mt-2 text-2xl font-semibold">Over / under budget</h2>
+                  <svg className="mt-5 block h-auto w-full max-w-full" width="720" height="270" viewBox="0 0 720 270" role="img" aria-labelledby="budget-variance-chart-title budget-variance-chart-description">
+                    <title id="budget-variance-chart-title">Monthly budget variance for {currentYear}</title>
+                    <desc id="budget-variance-chart-description">Budget minus spending. Positive bars indicate under budget; negative bars indicate over budget. Months without a budget have no bar.</desc>
+                    {[-1, -0.5, 0, 0.5, 1].map((ratio) => {
+                      const y = 112 - ratio * 88;
+                      const value = budgetVarianceMax * ratio;
+                      return (
+                        <g key={ratio}>
+                          <line x1="82" x2="704" y1={y} y2={y} stroke="#20251f" strokeOpacity={ratio === 0 ? "0.35" : "0.12"} />
+                          <text x="74" y={y + 4} textAnchor="end" fill="#65715e" fontSize="10">{formatChartMoney(value)}</text>
+                        </g>
+                      );
+                    })}
+                    {yearMonths.map((item, index) => {
+                      if (item.budgetVarianceCents === null) {
+                        return <text key={item.key} x={yearChartX(index)} y="238" textAnchor="middle" fill="#65715e" fontSize="11">{item.shortLabel}</text>;
+                      }
+                      const height = Math.abs(item.budgetVarianceCents) / budgetVarianceMax * 88;
+                      return (
+                        <g key={item.key}>
+                          <rect
+                            x={yearChartX(index) - 14}
+                            y={item.budgetVarianceCents >= 0 ? 112 - height : 112}
+                            width="28"
+                            height={height}
+                            fill={item.budgetVarianceCents < 0 ? "#bf5b3f" : "#4f8271"}
+                          >
+                            <title>{`${item.label} ${item.budgetVarianceCents < 0 ? "over" : "under"} budget: ${formatMoney(Math.abs(item.budgetVarianceCents))}`}</title>
+                          </rect>
+                          <text x={yearChartX(index)} y="238" textAnchor="middle" fill="#65715e" fontSize="11">{item.shortLabel}</text>
+                        </g>
+                      );
+                    })}
+                  </svg>
+                  <p className="mt-1 text-xs text-[#65715e]">Positive is under budget; negative is over. Months without a budget have no bar.</p>
+                </div>
+              </section>
+            )}
+            <section className={`grid gap-5 ${isMonthView ? "" : "xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.85fr)]"}`}>
+              {isMonthView && (
+                <section className="border border-[#20251f]/15 bg-[#fbfaf7] p-5 sm:p-7">
+                  <div className="flex flex-wrap items-baseline justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#65715e]">Monthly breakdown</p>
+                      <h2 className="mt-2 text-2xl font-semibold">Spending by category</h2>
+                    </div>
+                    <p className="font-semibold tabular-nums">{formatMoney(monthCategoryTotal)}</p>
+                  </div>
+                  {monthCategoryExpenses.length ? (
+                    <figure className="mt-6 flex flex-col items-center gap-6 sm:flex-row sm:items-center">
+                      <div
+                        aria-label={`Category expenses for ${monthLabel(selectedMonth)}`}
+                        className="size-48 shrink-0 rounded-full border border-[#20251f]/10 sm:size-56"
+                        role="img"
+                        style={{ background: pieChartBackground }}
+                      />
+                      <ul className="grid max-h-64 w-full grid-cols-1 gap-x-6 gap-y-2 overflow-y-auto sm:grid-cols-2">
+                        {monthCategoryExpenses.map((category) => (
+                          <li className="flex min-w-0 items-center justify-between gap-3 border-b border-[#20251f]/10 py-2 text-sm" key={category.name}>
+                            <span className="flex min-w-0 items-center gap-2">
+                              <span aria-hidden="true" className="size-3 shrink-0 rounded-full" style={{ backgroundColor: category.color }} />
+                              <span className="truncate">{category.name}</span>
+                            </span>
+                            <span className="shrink-0 text-right tabular-nums">
+                              <span className="font-semibold">{formatMoney(category.amountCents)}</span>
+                              <span className="ml-2 text-xs text-[#65715e]">{(category.amountCents / monthCategoryTotal * 100).toFixed(1)}%</span>
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </figure>
+                  ) : (
+                    <p className="mt-6 border-t border-[#20251f]/10 pt-4 text-sm text-[#65715e]">No expenses recorded for this month.</p>
+                  )}
+                </section>
+              )}
+              {!isMonthView && <div className="border border-[#20251f]/15 bg-[#fbfaf7] p-5 sm:p-7">
                 <div className="flex items-start justify-between">
                   <div>
                     <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#65715e]">
@@ -761,7 +1046,8 @@ export default function Home() {
                   <span><span className="mr-2 inline-block size-2 bg-[#4f8271]" />Savings</span>
                   <span><span className="mr-2 inline-block size-2 bg-[#bf5b3f]" />Over budget / negative savings</span>
                 </div>
-              </div>
+              </div>}
+              {isMonthView && expenseHistorySection}
               <div className="border border-[#20251f]/15 bg-[#fbfaf7] p-5 sm:p-7">
                 <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#65715e]">
                   {isYearlyExpenseView ? "Yearly expenses" : "Monthly plan"}
@@ -838,145 +1124,7 @@ export default function Home() {
                 )}
               </div>
             </section>
-            {showExpenseHistory && (
-              <section className="mt-5 border border-[#20251f]/15 bg-[#fbfaf7] p-5 sm:p-7">
-                <div className="mb-5 flex flex-wrap items-end justify-between gap-4">
-                  <div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#65715e]">
-                      Expense history
-                    </p>
-                    <h2 className="mt-2 text-2xl font-semibold">All expenses</h2>
-                  </div>
-                  <span className="text-sm text-[#65715e]">
-                    {filteredTransactions.length} shown
-                  </span>
-                </div>
-                <div className="mb-5 grid gap-3 sm:grid-cols-[1.5fr_1fr_1fr]">
-                  <label className="sr-only" htmlFor="expense-search">
-                    Search expenses
-                  </label>
-                  <input
-                    id="expense-search"
-                    className="border border-[#20251f]/15 bg-transparent px-3 py-2 text-sm"
-                    placeholder="Search merchant, category, notes..."
-                    value={searchTerm}
-                    onChange={(event) => setSearchTerm(event.target.value)}
-                  />
-                  <label className="sr-only" htmlFor="category-filter">
-                    Filter category
-                  </label>
-                  <select
-                    id="category-filter"
-                    className="border border-[#20251f]/15 bg-[#fbfaf7] px-3 py-2 text-sm"
-                    value={filterCategory}
-                    onChange={(event) => setFilterCategory(event.target.value)}
-                  >
-                    <option value="">All categories</option>
-                    {categories.map((category) => (
-                      <option key={category}>{category}</option>
-                    ))}
-                  </select>
-                  <label className="sr-only" htmlFor="payment-filter">
-                    Filter payment method
-                  </label>
-                  <select
-                    id="payment-filter"
-                    className="border border-[#20251f]/15 bg-[#fbfaf7] px-3 py-2 text-sm"
-                    value={filterPaymentMethod}
-                    onChange={(event) => setFilterPaymentMethod(event.target.value)}
-                  >
-                    <option value="">All payment methods</option>
-                    {paymentMethods.map((method) => (
-                      <option key={method}>{method}</option>
-                    ))}
-                  </select>
-                </div>
-                {filteredTransactions.length ? (
-                  <div className="overflow-x-auto">
-                    <table className="w-full min-w-[680px] text-left text-sm">
-                      <thead className="border-b border-[#20251f]/15 text-xs uppercase tracking-[0.12em] text-[#65715e]">
-                        <tr>
-                          <th className="pb-3 font-semibold">
-                            <button onClick={() => changeSort("date")}>
-                              Date{sortIndicator("date")}
-                            </button>
-                          </th>
-                          <th className="pb-3 font-semibold">
-                            <button onClick={() => changeSort("merchant")}>
-                              Merchant{sortIndicator("merchant")}
-                            </button>
-                          </th>
-                          <th className="pb-3 font-semibold">
-                            <button onClick={() => changeSort("category")}>
-                              Category{sortIndicator("category")}
-                            </button>
-                          </th>
-                          <th className="pb-3 font-semibold">
-                            <button onClick={() => changeSort("paymentMethod")}>
-                              Payment{sortIndicator("paymentMethod")}
-                            </button>
-                          </th>
-                          <th className="pb-3 text-right font-semibold">
-                            <button onClick={() => changeSort("amountCents")}>
-                              Amount{sortIndicator("amountCents")}
-                            </button>
-                          </th>
-                          <th />
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {sortedFilteredTransactions.map((transaction) => (
-                          <tr
-                            className="border-b border-[#20251f]/10 last:border-0"
-                            key={transaction.id}
-                          >
-                            <td className="py-4 text-[#65715e]">
-                              {transaction.date}
-                            </td>
-                            <td className="py-4 font-semibold">
-                              {transaction.merchant}
-                            </td>
-                            <td className="py-4">
-                              <span className="border border-[#20251f]/15 px-2 py-1 text-xs">
-                                {transaction.category}
-                              </span>
-                            </td>
-                            <td className="py-4 text-[#65715e]">
-                              {transaction.paymentMethod}
-                            </td>
-                            <td className="py-4 text-right font-semibold">
-                              {formatMoney(transaction.amountCents)}
-                            </td>
-                            <td className="py-4 text-right">
-                              <button
-                                className="mr-3 text-xs text-[#65715e]"
-                                onClick={() => {
-                                  setEditingTransaction(transaction);
-                                  setShowForm(true);
-                                }}
-                              >
-                                Edit
-                              </button>
-                              <button
-                                className="text-xs text-[#bf5b3f]"
-                                onClick={() => void removeTransaction(transaction.id)}
-                                disabled={deletingId === transaction.id}
-                              >
-                                {deletingId === transaction.id
-                                  ? "Removing"
-                                  : "Remove"}
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <EmptyState onAdd={() => setShowForm(true)} />
-                )}
-              </section>
-            )}
+            {!isMonthView && showExpenseHistory && expenseHistorySection}
           </div>
         </div>
       </div>
@@ -1003,18 +1151,10 @@ export default function Home() {
           categories={categories}
           onImported={(imported) => {
             setTransactions((current) => {
-              const merged = new Map(
-                current.map((transaction) => [transaction.id, transaction]),
-              );
-              imported.forEach((transaction) =>
-                merged.set(transaction.id, transaction),
-              );
+              const merged = new Map(current.map((transaction) => [transaction.id, transaction]));
+              imported.forEach((transaction) => merged.set(transaction.id, transaction));
               const next = [...merged.values()];
-              if (user)
-                window.localStorage.setItem(
-                  `financials:transactions:${user.uid}`,
-                  JSON.stringify(next),
-                );
+              if (user) window.localStorage.setItem(`financials:transactions:${user.uid}`, JSON.stringify(next));
               return next;
             });
           }}
@@ -1036,7 +1176,6 @@ export default function Home() {
     </main>
   );
 }
-
 function TransactionForm({ user, categories, transaction, onClose }: { user: User | null; categories: string[]; transaction: Transaction | null; onClose: () => void }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
