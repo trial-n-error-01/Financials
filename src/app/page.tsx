@@ -7,7 +7,7 @@ import { addDoc, collection, deleteDoc, doc, enableNetwork, getDocs, onSnapshot,
 import { onAuthStateChanged, type User } from "firebase/auth";
 import Papa from "papaparse";
 import { auth, db, firebaseConfigured } from "@/lib/firebase";
-import TripManager from "@/components/trip-manager";
+import TripManager, { type Trip } from "@/components/trip-manager";
 
 type Transaction = {
   id: string;
@@ -51,6 +51,7 @@ const formatMoney = (hkdCents: number) => money.format(hkdCents / 100);
 const formatChartMoney = (hkdCents: number) => chartMoney.format(hkdCents / 100);
 const monthLabel = (key: string) => key === "all" ? "All months" : new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric" }).format(new Date(`${key}-01T12:00:00`));
 const monthNames = Array.from({ length: 12 }, (_, index) => new Intl.DateTimeFormat("en-GB", { month: "long" }).format(new Date(2026, index, 1)).toLowerCase());
+const tripPagePath = (trip: Trip) => `/${trip.month.slice(0, 4)}/${monthNames[Number(trip.month.slice(5, 7)) - 1]}/trips/${encodeURIComponent(trip.id)}`;
 const categoryChartColors = ["#bf5b3f", "#4f8271", "#d39b45", "#6478a6", "#9a6586", "#71833c", "#478a9e", "#ce7757"];
 
 function parseYearlyExpenseCache(value: string): Record<string, YearlyExpenseEntry[]> {
@@ -79,8 +80,11 @@ export default function Home() {
   const router = useRouter();
   const pathSegments = pathname.split("/").filter(Boolean);
   const routeYear = /^\d{4}$/.test(pathSegments[0] ?? "") ? pathSegments[0] : "";
-  const routeMonthIndex = monthNames.indexOf((pathSegments[1] ?? "").toLowerCase());
-  const isYearlyExpenseRoute = pathSegments[1] === "taxes-and-others";
+  const routePeriod = pathSegments[1] ?? "";
+  const routeMonthIndex = monthNames.indexOf(routePeriod.toLowerCase());
+  const isYearlyExpenseRoute = routePeriod === "taxes-and-others";
+  const tripId = pathSegments[3] ?? "";
+  const isTripView = Boolean(routeYear && routeMonthIndex >= 0 && pathSegments.length === 4 && pathSegments[2] === "trips" && tripId);
   const isOverallView = pathname === "/overall" || pathname === "/";
   const isMonthView = Boolean(routeYear && routeMonthIndex >= 0);
   const selectedMonth = isYearlyExpenseRoute
@@ -91,6 +95,7 @@ export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [transactions, setTransactions] = useState<Transaction[]>(firebaseConfigured ? [] : demoTransactions);
   const [monthlyPlans, setMonthlyPlans] = useState<MonthlyPlan[]>([]);
+  const [yearTrips, setYearTrips] = useState<Trip[]>([]);
   const [yearlyExpenses, setYearlyExpenses] = useState<Record<string, YearlyExpenseEntry[]>>({});
   const [yearlyExpenseName, setYearlyExpenseName] = useState("");
   const [yearlyExpenseAmount, setYearlyExpenseAmount] = useState("");
@@ -134,8 +139,12 @@ export default function Home() {
     }
     if (pathSegments.length > 1 && routeMonthIndex === -1 && !isYearlyExpenseRoute) {
       router.replace(`/${routeYear}`);
+      return;
     }
-  }, [pathname, pathSegments.length, routeMonthIndex, routeYear, isYearlyExpenseRoute, router]);
+    if (pathSegments.length > 2 && !isTripView) {
+      router.replace(`/${routeYear}/${routePeriod}`);
+    }
+  }, [pathname, pathSegments.length, routeMonthIndex, routeYear, routePeriod, isYearlyExpenseRoute, isTripView, router]);
 
   useEffect(() => {
     if (!auth) return;
@@ -352,6 +361,55 @@ export default function Home() {
   const yearSalary = yearMonths.reduce((total, item) => total + item.salaryCents, 0);
   const yearOverBudget = yearMonths.reduce((total, item) => total + item.overBudgetCents, 0);
   const yearSavings = yearSalary - yearTotal - yearlyExpenseTotal;
+  const yearTripColumns = yearTrips
+    .filter((trip) => trip.month.startsWith(`${currentYear}-`))
+    .map((trip) => {
+      const spentCents = trip.expenses.reduce((total, expense) => total + expense.amountCents, 0);
+      return {
+        ...trip,
+        spentCents,
+        remainingCents: trip.budgetCents - spentCents,
+        monthName: new Intl.DateTimeFormat("en-GB", { month: "long" }).format(new Date(`${trip.month}-01T12:00:00`)),
+      };
+    });
+  const yearlyChartColumns = [
+    ...yearMonths.map((item) => ({
+      key: item.key,
+      name: item.shortLabel,
+      title: item.label,
+      budgetCents: item.budgetCents,
+      spentCents: item.total,
+      remainingCents: item.savingsCents,
+      isTrip: false,
+      href: `/${currentYear}/${monthNames[Number(item.key.slice(5, 7)) - 1]}`,
+    })),
+    ...yearTripColumns.map((trip) => ({
+      key: `trip-${trip.id}`,
+      name: trip.name,
+      title: `${trip.name} (${trip.monthName})`,
+      budgetCents: trip.budgetCents,
+      spentCents: trip.spentCents,
+      remainingCents: trip.remainingCents,
+      isTrip: true,
+      href: tripPagePath(trip),
+    })),
+  ];
+  const budgetVarianceColumns = [
+    ...yearMonths.map((item, index) => ({
+      key: item.key,
+      label: item.shortLabel,
+      title: item.label,
+      varianceCents: item.budgetVarianceCents,
+      href: `/${currentYear}/${monthNames[index]}`,
+    })),
+    ...yearTripColumns.map((trip) => ({
+      key: `trip-${trip.id}`,
+      label: trip.name,
+      title: `${trip.name} (${trip.monthName})`,
+      varianceCents: trip.remainingCents,
+      href: tripPagePath(trip),
+    })),
+  ];
   const salarySavingsMax = Math.max(1, ...yearMonths.map((item) => item.salaryCents), ...yearMonths.map((item) => item.savingsCents));
   const salarySavingsMin = Math.min(0, ...yearMonths.map((item) => item.savingsCents));
   const salarySavingsRange = salarySavingsMax - salarySavingsMin || 1;
@@ -360,11 +418,13 @@ export default function Home() {
   const salaryLinePath = yearMonths.map((item, index) => `${index === 0 ? "M" : "L"} ${yearChartX(index)} ${yearChartY(item.salaryCents)}`).join(" ");
   const savingsLinePath = yearMonths.map((item, index) => `${index === 0 ? "M" : "L"} ${yearChartX(index)} ${yearChartY(item.savingsCents)}`).join(" ");
   const salarySavingsTicks = Array.from({ length: 5 }, (_, index) => salarySavingsMax - salarySavingsRange * index / 4);
-  const budgetVarianceMax = Math.max(1, ...yearMonths.map((item) => Math.abs(item.budgetVarianceCents ?? 0)));
+  const budgetVarianceMax = Math.max(1, ...budgetVarianceColumns.map((item) => Math.abs(item.varianceCents ?? 0)));
+  const budgetVarianceChartWidth = Math.max(720, 82 + (budgetVarianceColumns.length - 1) * 56 + 16);
+  const budgetVarianceChartX = (index: number) => 82 + index * 56;
   const monthBudgetVariance = selectedMonthPlan && selectedMonthPlan.budgetCents > 0
     ? selectedMonthPlan.budgetCents - monthTotal
     : null;
-  const maxYearValue = Math.max(...yearMonths.flatMap((item) => [item.total, item.budgetCents, Math.abs(item.savingsCents)]), 1);
+  const maxYearValue = Math.max(...yearlyChartColumns.flatMap((item) => [item.budgetCents, item.spentCents, Math.abs(item.remainingCents)]), 1);
   const saveMonthlyPlan = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (selectedMonth === "all") return;
@@ -761,6 +821,22 @@ export default function Home() {
     );
   }
 
+  if (isTripView) {
+    return (
+      <main className="min-h-screen bg-[#f4f1ea] px-5 py-6 text-[#20251f] sm:px-8 lg:px-12">
+        <div className="mx-auto max-w-[1440px]">
+          <header className="border-b border-[#20251f]/15 pb-6">
+            <Link href="/overall" className="text-xs font-semibold uppercase tracking-[0.28em] text-[#65715e] hover:text-[#bf5b3f]">Financials</Link>
+            <h1 className="mt-2 text-3xl font-semibold tracking-tight">Trip details</h1>
+          </header>
+          <div className="mt-7 max-w-3xl">
+            <TripManager user={user} month={selectedMonth} tripId={tripId} mode="detail" onTripsChange={setYearTrips} />
+          </div>
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="min-h-screen bg-[#f4f1ea] px-5 py-6 text-[#20251f] sm:px-8 lg:px-12">
       <div className="mx-auto max-w-[1440px]">
@@ -918,41 +994,35 @@ export default function Home() {
                 <div className="min-w-0 border border-[#20251f]/15 bg-[#fbfaf7] p-5 sm:p-7">
                   <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#65715e]">Budget variance</p>
                   <h2 className="mt-2 text-2xl font-semibold">Over / under budget</h2>
-                  <svg className="mt-5 block h-auto w-full max-w-full" width="720" height="270" viewBox="0 0 720 270" role="img" aria-labelledby="budget-variance-chart-title budget-variance-chart-description">
-                    <title id="budget-variance-chart-title">Monthly budget variance for {currentYear}</title>
-                    <desc id="budget-variance-chart-description">Budget minus spending. Positive bars indicate under budget; negative bars indicate over budget. Months without a budget have no bar.</desc>
-                    {[-1, -0.5, 0, 0.5, 1].map((ratio) => {
-                      const y = 112 - ratio * 88;
-                      const value = budgetVarianceMax * ratio;
-                      return (
-                        <g key={ratio}>
-                          <line x1="82" x2="704" y1={y} y2={y} stroke="#20251f" strokeOpacity={ratio === 0 ? "0.35" : "0.12"} />
-                          <text x="74" y={y + 4} textAnchor="end" fill="#65715e" fontSize="10">{formatChartMoney(value)}</text>
-                        </g>
-                      );
-                    })}
-                    {yearMonths.map((item, index) => {
-                      if (item.budgetVarianceCents === null) {
-                        return <text key={item.key} x={yearChartX(index)} y="238" textAnchor="middle" fill="#65715e" fontSize="11">{item.shortLabel}</text>;
-                      }
-                      const height = Math.abs(item.budgetVarianceCents) / budgetVarianceMax * 88;
-                      return (
-                        <g key={item.key}>
-                          <rect
-                            x={yearChartX(index) - 14}
-                            y={item.budgetVarianceCents >= 0 ? 112 - height : 112}
-                            width="28"
-                            height={height}
-                            fill={item.budgetVarianceCents < 0 ? "#bf5b3f" : "#4f8271"}
-                          >
-                            <title>{`${item.label} ${item.budgetVarianceCents < 0 ? "over" : "under"} budget: ${formatMoney(Math.abs(item.budgetVarianceCents))}`}</title>
-                          </rect>
-                          <text x={yearChartX(index)} y="238" textAnchor="middle" fill="#65715e" fontSize="11">{item.shortLabel}</text>
-                        </g>
-                      );
-                    })}
-                  </svg>
-                  <p className="mt-1 text-xs text-[#65715e]">Positive is under budget; negative is over. Months without a budget have no bar.</p>
+                  <div className="mt-5 min-w-0 overflow-x-auto">
+                    <svg className="block h-auto max-w-none" width={budgetVarianceChartWidth} height="270" viewBox={`0 0 ${budgetVarianceChartWidth} 270`} role="img" aria-labelledby="budget-variance-chart-title budget-variance-chart-description">
+                      <title id="budget-variance-chart-title">Monthly and trip budget variance for {currentYear}</title>
+                      <desc id="budget-variance-chart-description">Budget minus spending. Positive bars indicate under budget; negative bars indicate over budget. Each trip has its own bar.</desc>
+                      {[-1, -0.5, 0, 0.5, 1].map((ratio) => {
+                        const y = 112 - ratio * 88;
+                        const value = budgetVarianceMax * ratio;
+                        return (
+                          <g key={ratio}>
+                            <line x1="82" x2={budgetVarianceChartWidth - 16} y1={y} y2={y} stroke="#20251f" strokeOpacity={ratio === 0 ? "0.35" : "0.12"} />
+                            <text x="74" y={y + 4} textAnchor="end" fill="#65715e" fontSize="10">{formatChartMoney(value)}</text>
+                          </g>
+                        );
+                      })}
+                      {budgetVarianceColumns.map((item, index) => {
+                        const x = budgetVarianceChartX(index);
+                        const label = item.label.length > 7 ? `${item.label.slice(0, 6)}...` : item.label;
+                        const height = item.varianceCents === null ? 0 : Math.abs(item.varianceCents) / budgetVarianceMax * 88;
+                        return (
+                          <g key={item.key}>
+                            <title>{item.varianceCents === null ? `${item.title}: budget not set` : `${item.title}: ${item.varianceCents < 0 ? "over" : "under"} budget by ${formatMoney(Math.abs(item.varianceCents))}`}</title>
+                            {item.varianceCents !== null && <rect x={x - 14} y={item.varianceCents >= 0 ? 112 - height : 112} width="28" height={height} fill={item.varianceCents < 0 ? "#bf5b3f" : "#4f8271"} />}
+                            <text x={x} y="238" textAnchor="middle" fill="#65715e" fontSize="11">{label}</text>
+                          </g>
+                        );
+                      })}
+                    </svg>
+                  </div>
+                  <p className="mt-1 text-xs text-[#65715e]">Positive is under budget; negative is over. Each trip has its own bar.</p>
                 </div>
               </section>
             )}
@@ -1012,36 +1082,41 @@ export default function Home() {
                     <span className="break-words text-sm font-semibold tabular-nums">{formatMoney(yearlyExpenseTotal)}</span>
                     <span className="text-center text-[11px] text-[#65715e]">{currentYear}</span>
                   </button>
-                  <div role="group" aria-label={`Monthly budget, spending and savings for ${currentYear}`} className="grid h-48 grid-cols-6 items-end gap-3 border-b border-[#20251f]/15 sm:grid-cols-12 sm:gap-2">
-                    {yearMonths.map((item) => (
-                      <div
-                        className="flex h-full min-w-0 flex-col justify-end gap-2"
-                        key={item.key}
-                      >
-                        <div className="flex h-full w-full items-end justify-center gap-0.5">
-                          {[
-                            { label: "Budget", value: item.budgetCents, color: "bg-[#b8c6ae]" },
-                            { label: "Spent", value: item.total, color: item.overBudgetCents > 0 ? "bg-[#bf5b3f]" : "bg-[#65715e]" },
-                            { label: "Savings", value: item.savingsCents, color: item.savingsCents >= 0 ? "bg-[#4f8271]" : "bg-[#bf5b3f]" },
-                          ].map((series) => (
-                            <div
-                              key={series.label}
-                              className={`w-1/3 ${series.color} ${item.key === selectedMonth ? "opacity-100" : "opacity-75"}`}
-                              style={{ height: `${Math.max((Math.abs(series.value) / maxYearValue) * 100, series.value ? 5 : 1)}%` }}
-                              title={`${item.label} ${series.label.toLowerCase()}: ${formatMoney(series.value)}`}
-                            />
-                          ))}
+                  <div className="min-w-0 overflow-x-auto border-b border-[#20251f]/15">
+                    <div role="group" aria-label={`Monthly and trip budget, spending and savings for ${currentYear}`} className="grid h-48 items-end gap-2" style={{ gridTemplateColumns: `repeat(${yearlyChartColumns.length}, 3.5rem)`, width: `${yearlyChartColumns.length * 4}rem` }}>
+                      {yearlyChartColumns.map((item) => (
+                        <div
+                          className="flex h-full min-w-0 flex-col justify-end gap-2"
+                          key={item.key}
+                        >
+                          <div className="flex h-full w-full items-end justify-center gap-0.5">
+                            {[
+                              { label: item.isTrip ? "Trip budget" : "Budget", value: item.budgetCents, color: "bg-[#b8c6ae]" },
+                              { label: item.isTrip ? "Trip expenses" : "Spent", value: item.spentCents, color: item.isTrip ? "bg-[#478a9e]" : "bg-[#65715e]" },
+                              { label: item.isTrip ? "Budget remaining" : "Savings", value: item.remainingCents, color: item.remainingCents >= 0 ? "bg-[#4f8271]" : "bg-[#bf5b3f]" },
+                            ].map((series) => (
+                              <div
+                                key={series.label}
+                                className={`w-1/3 ${series.color} ${item.key === selectedMonth || item.isTrip ? "opacity-100" : "opacity-75"}`}
+                                style={{ height: `${Math.max((Math.abs(series.value) / maxYearValue) * 100, series.value ? 5 : 1)}%` }}
+                                title={`${item.title} ${series.label.toLowerCase()}: ${formatMoney(series.value)}`}
+                              />
+                            ))}
+                          </div>
+                          {item.isTrip ? (
+                            <Link className="truncate text-center text-[11px] text-[#478a9e] hover:underline" href={item.href} title={item.title}>{item.name}</Link>
+                          ) : (
+                            <button className="truncate text-center text-[11px] text-[#65715e]" onClick={() => navigateToMonth(item.key)} title={item.title}>{item.name}</button>
+                          )}
                         </div>
-                        <button className="truncate text-center text-[11px] text-[#65715e]" onClick={() => navigateToMonth(item.key)} title={item.label}>
-                          {item.shortLabel}
-                        </button>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
                 </div>
                 <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-xs text-[#65715e]">
                   <span><span className="mr-2 inline-block size-2 bg-[#b8c6ae]" />Budget</span>
                   <span><span className="mr-2 inline-block size-2 bg-[#65715e]" />Spent</span>
+                  <span><span className="mr-2 inline-block size-2 bg-[#478a9e]" />Trip expenses</span>
                   <span><span className="mr-2 inline-block size-2 bg-[#4f8271]" />Savings</span>
                   <span><span className="mr-2 inline-block size-2 bg-[#bf5b3f]" />Over budget / negative savings</span>
                 </div>
@@ -1123,7 +1198,7 @@ export default function Home() {
                 )}
               </div>
             </section>
-            {isMonthView && <TripManager user={user} month={selectedMonth} />}
+            <TripManager user={user} month={selectedMonth} mode={isMonthView ? "month" : "hidden"} onTripsChange={setYearTrips} />
             {!isMonthView && showExpenseHistory && expenseHistorySection}
           </div>
         </div>

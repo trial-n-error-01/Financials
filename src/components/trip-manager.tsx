@@ -3,15 +3,17 @@
 import { startTransition, useEffect, useState } from "react";
 import { collection, deleteDoc, doc, onSnapshot, query, setDoc, where } from "firebase/firestore";
 import type { User } from "firebase/auth";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { db, firebaseConfigured } from "@/lib/firebase";
 
-type TripExpense = {
+export type TripExpense = {
     id: string;
     name: string;
     amountCents: number;
 };
 
-type Trip = {
+export type Trip = {
     id: string;
     userId: string;
     month: string;
@@ -22,8 +24,19 @@ type Trip = {
 
 const tripMoney = new Intl.NumberFormat("en-HK", { style: "currency", currency: "HKD" });
 const formatTripMoney = (amountCents: number) => tripMoney.format(amountCents / 100);
+const tripMonthPath = (month: string) => {
+    const monthName = new Intl.DateTimeFormat("en-GB", { month: "long" }).format(new Date(`${month}-01T12:00:00`)).toLowerCase();
+    return `/${month.slice(0, 4)}/${monthName}`;
+};
 
-export default function TripManager({ user, month }: { user: User | null; month: string }) {
+export default function TripManager({ user, month, tripId = "", mode = "month", onTripsChange }: {
+    user: User | null;
+    month: string;
+    tripId?: string;
+    mode?: "hidden" | "month" | "detail";
+    onTripsChange?: (trips: Trip[]) => void;
+}) {
+    const router = useRouter();
     const [trips, setTrips] = useState<Trip[]>([]);
     const [showTripForm, setShowTripForm] = useState(false);
     const [editingBudgetId, setEditingBudgetId] = useState("");
@@ -79,6 +92,10 @@ export default function TripManager({ user, month }: { user: User | null; month:
             setError(`Could not load trips: ${snapshotError.message}`);
         });
     }, [cacheKey, user]);
+
+    useEffect(() => {
+        onTripsChange?.(trips);
+    }, [onTripsChange, trips]);
 
     const saveTrip = async (trip: Trip) => {
         setSavingTripId(trip.id);
@@ -188,6 +205,7 @@ export default function TripManager({ user, month }: { user: User | null; month:
                 window.localStorage.setItem(cacheKey, JSON.stringify(next));
                 return next;
             });
+            if (mode === "detail") router.push(tripMonthPath(trip.month));
             setMessage("Trip removed.");
         } catch (removeError) {
             setError(removeError instanceof Error ? removeError.message : "Could not remove this trip.");
@@ -196,26 +214,31 @@ export default function TripManager({ user, month }: { user: User | null; month:
         }
     };
 
+    if (mode === "hidden") return null;
+
+    const visibleTrips = mode === "detail" ? trips.filter((trip) => trip.id === tripId) : monthTrips;
+
     return (
         <section className="border border-[#20251f]/15 bg-[#fbfaf7] p-5 sm:p-7" aria-labelledby="trips-heading">
             <div className="flex flex-wrap items-start justify-between gap-4">
                 <div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#65715e]">Travel budgets</p>
-                    <h2 id="trips-heading" className="mt-2 text-2xl font-semibold">Trips</h2>
-                    <p className="mt-1 text-sm text-[#65715e]">Track each trip’s expenses against its own budget.</p>
+                    {mode === "detail" && <Link className="text-xs font-semibold uppercase tracking-[0.12em] text-[#65715e] hover:text-[#bf5b3f]" href={tripMonthPath(month)}>Back to {new Intl.DateTimeFormat("en-GB", { month: "long" }).format(new Date(`${month}-01T12:00:00`))}</Link>}
+                    <p className="mt-3 text-xs font-semibold uppercase tracking-[0.16em] text-[#65715e]">{mode === "detail" ? "Trip details" : "Travel budgets"}</p>
+                    <h2 id="trips-heading" className="mt-2 text-2xl font-semibold">{mode === "detail" ? visibleTrips[0]?.name ?? "Trip not found" : "Trips"}</h2>
+                    {mode === "month" && <p className="mt-1 text-sm text-[#65715e]">Track each trip’s expenses against its own budget.</p>}
                 </div>
-                <button
+                {mode === "month" && <button
                     type="button"
                     className="bg-[#20251f] px-4 py-2 text-sm font-semibold text-[#fbfaf7] disabled:opacity-50"
                     onClick={() => setShowTripForm((shown) => !shown)}
                     disabled={firebaseConfigured && !user}
                 >
                     {showTripForm ? "Cancel" : "+ Add a trip"}
-                </button>
+                </button>}
             </div>
 
-            {firebaseConfigured && !user && <p className="mt-4 text-sm text-[#65715e]">Sign in to manage trips.</p>}
-            {showTripForm && (
+            {mode === "month" && firebaseConfigured && !user && <p className="mt-4 text-sm text-[#65715e]">Sign in to manage trips.</p>}
+            {mode === "month" && showTripForm && (
                 <form className="mt-5 grid gap-4 border-t border-[#20251f]/10 pt-5 sm:grid-cols-[minmax(0,1fr)_12rem_auto] sm:items-end" onSubmit={createTrip}>
                     <label className="block text-sm font-semibold">
                         Trip name
@@ -236,14 +259,14 @@ export default function TripManager({ user, month }: { user: User | null; month:
             {message && <p role="status" className="mt-4 text-sm text-[#4f8271]">{message}</p>}
 
             <div className="mt-5 space-y-4">
-                {monthTrips.map((trip) => {
+                {visibleTrips.map((trip) => {
                     const spentCents = trip.expenses.reduce((total, expense) => total + expense.amountCents, 0);
                     const varianceCents = trip.budgetCents - spentCents;
                     return (
                         <article key={trip.id} className="border border-[#20251f]/15 p-4 sm:p-5">
                             <div className="flex flex-wrap items-start justify-between gap-3">
                                 <div className="min-w-0">
-                                    <h3 className="break-words text-lg font-semibold">{trip.name}</h3>
+                                    <h3 className="break-words text-lg font-semibold">{mode === "month" ? <Link href={`${tripMonthPath(trip.month)}/trips/${encodeURIComponent(trip.id)}`} className="hover:text-[#bf5b3f]">{trip.name}</Link> : trip.name}</h3>
                                     <p className={`mt-1 text-sm font-semibold ${varianceCents < 0 ? "text-[#bf5b3f]" : "text-[#4f8271]"}`}>
                                         {varianceCents < 0
                                             ? `Over budget by ${formatTripMoney(Math.abs(varianceCents))}`
@@ -318,7 +341,7 @@ export default function TripManager({ user, month }: { user: User | null; month:
                         </article>
                     );
                 })}
-                {monthTrips.length === 0 && <p className="border-t border-[#20251f]/10 pt-4 text-sm text-[#65715e]">No trips added for this month.</p>}
+                {visibleTrips.length === 0 && <p className="border-t border-[#20251f]/10 pt-4 text-sm text-[#65715e]">{mode === "detail" ? "This trip could not be found." : "No trips added for this month."}</p>}
             </div>
         </section>
     );
