@@ -96,6 +96,8 @@ export default function Home() {
   const [transactions, setTransactions] = useState<Transaction[]>(firebaseConfigured ? [] : demoTransactions);
   const [monthlyPlans, setMonthlyPlans] = useState<MonthlyPlan[]>([]);
   const [yearTrips, setYearTrips] = useState<Trip[]>([]);
+  const [exportingYear, setExportingYear] = useState("");
+  const [exportError, setExportError] = useState("");
   const [yearlyExpenses, setYearlyExpenses] = useState<Record<string, YearlyExpenseEntry[]>>({});
   const [yearlyExpenseName, setYearlyExpenseName] = useState("");
   const [yearlyExpenseAmount, setYearlyExpenseAmount] = useState("");
@@ -294,6 +296,9 @@ export default function Home() {
     const monthlyTransactions = transactions.filter((transaction) => transaction.date.startsWith(key));
     const plan = monthlyPlans.find((item) => item.month === key);
     const total = monthlyTransactions.reduce((sum, transaction) => sum + transaction.amountCents, 0);
+    const tripExpenses = yearTrips
+      .filter((trip) => trip.month === key)
+      .reduce((sum, trip) => sum + trip.expenses.reduce((tripTotal, expense) => tripTotal + expense.amountCents, 0), 0);
     const budgetCents = plan?.budgetCents ?? 0;
     const salaryCents = plan?.salaryCents ?? 0;
     const date = new Date(currentYear, index, 1);
@@ -307,9 +312,9 @@ export default function Home() {
       budgetVarianceCents: budgetCents > 0 ? budgetCents - total : null,
       salaryCents,
       overBudgetCents: budgetCents > 0 ? Math.max(total - budgetCents, 0) : 0,
-      savingsCents: salaryCents > 0 ? salaryCents - total : 0,
+      savingsCents: salaryCents - total - tripExpenses,
     };
-  }), [currentYear, monthlyPlans, transactions]);
+  }), [currentYear, monthlyPlans, transactions, yearTrips]);
   const yearTransactions = transactions.filter((transaction) => transaction.date.startsWith(`${currentYear}-`));
   const selectedMonthPlan = yearMonths.find((item) => item.key === selectedMonth);
   const isYearlyExpenseView = selectedMonth === "yearly-expenses";
@@ -360,7 +365,10 @@ export default function Home() {
   const yearBudget = yearMonths.reduce((total, item) => total + item.budgetCents, 0);
   const yearSalary = yearMonths.reduce((total, item) => total + item.salaryCents, 0);
   const yearOverBudget = yearMonths.reduce((total, item) => total + item.overBudgetCents, 0);
-  const yearSavings = yearSalary - yearTotal - yearlyExpenseTotal;
+  const yearTripExpenseTotal = yearTrips
+    .filter((trip) => trip.month.startsWith(`${currentYear}-`))
+    .reduce((total, trip) => total + trip.expenses.reduce((tripTotal, expense) => tripTotal + expense.amountCents, 0), 0);
+  const yearSavings = yearSalary - yearTotal - yearTripExpenseTotal - yearlyExpenseTotal;
   const yearTripColumns = yearTrips
     .filter((trip) => trip.month.startsWith(`${currentYear}-`))
     .map((trip) => {
@@ -749,6 +757,100 @@ export default function Home() {
   );
 
   if (isOverallView) {
+    const exportYear = async (year: string) => {
+      setExportingYear(year);
+      setExportError("");
+      try {
+        const XLSX = await import("@e965/xlsx");
+        const workbook = XLSX.utils.book_new();
+        const headers = ["Record type", "Date", "Name", "Category", "Payment method", "Notes", "Amount (HKD)", "Budget (HKD)", "Salary (HKD)", "Trip"];
+        const columnWidths = [20, 14, 28, 20, 20, 32, 16, 16, 16, 26].map((wch) => ({ wch }));
+
+        for (let index = 0; index < 12; index += 1) {
+          const monthKey = `${year}-${String(index + 1).padStart(2, "0")}`;
+          const monthName = new Intl.DateTimeFormat("en-GB", { month: "long" }).format(new Date(`${monthKey}-01T12:00:00`));
+          const rows: (string | number)[][] = [headers];
+          const plan = monthlyPlans.find((item) => item.month === monthKey);
+          if (plan) {
+            rows.push(["Monthly plan", "", "", "", "", "", "", plan.budgetCents / 100, plan.salaryCents / 100, ""]);
+          }
+          transactions
+            .filter((transaction) => transaction.date.startsWith(monthKey))
+            .sort((left, right) => left.date.localeCompare(right.date))
+            .forEach((transaction) => rows.push([
+              "Transaction",
+              transaction.date,
+              transaction.merchant,
+              transaction.category,
+              transaction.paymentMethod,
+              transaction.notes,
+              transaction.amountCents / 100,
+              "",
+              "",
+              "",
+            ]));
+          yearTrips
+            .filter((trip) => trip.month === monthKey)
+            .forEach((trip) => {
+              rows.push(["Trip budget", "", "", "", "", "", "", trip.budgetCents / 100, "", trip.name]);
+              trip.expenses.forEach((expense) => rows.push([
+                "Trip expense",
+                "",
+                expense.name,
+                "",
+                "",
+                "",
+                expense.amountCents / 100,
+                "",
+                "",
+                trip.name,
+              ]));
+            });
+          const sheet = XLSX.utils.aoa_to_sheet(rows);
+          sheet["!cols"] = columnWidths;
+          rows.slice(1).forEach((row, index) => [6, 7, 8].forEach((column) => {
+            const address = XLSX.utils.encode_cell({ r: index + 1, c: column });
+            if (sheet[address]) sheet[address].z = '"HK$"#,##0.00;[Red]-"HK$"#,##0.00';
+          }));
+          XLSX.utils.book_append_sheet(workbook, sheet, monthName);
+        }
+
+        const otherExpenseRows = [headers, ...(yearlyExpenses[year] ?? []).map((expense) => [
+          "Yearly expense",
+          "",
+          expense.name,
+          "",
+          "",
+          "",
+          expense.amountCents / 100,
+          "",
+          "",
+          "",
+        ])];
+        const otherExpensesSheet = XLSX.utils.aoa_to_sheet(otherExpenseRows);
+        otherExpensesSheet["!cols"] = columnWidths;
+        otherExpenseRows.slice(1).forEach((_, index) => {
+          const address = XLSX.utils.encode_cell({ r: index + 1, c: 6 });
+          if (otherExpensesSheet[address]) otherExpensesSheet[address].z = '"HK$"#,##0.00;[Red]-"HK$"#,##0.00';
+        });
+        XLSX.utils.book_append_sheet(workbook, otherExpensesSheet, "Taxes & Others");
+
+        const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
+        const url = URL.createObjectURL(new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `financials-${year}.xlsx`;
+        document.body.append(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (error) {
+        setExportError(error instanceof Error ? error.message : "Could not export this workbook.");
+      } finally {
+        setExportingYear("");
+      }
+    };
+
     const availableYears = [...new Set([
       ...transactions.map((transaction) => transaction.date.slice(0, 4)),
       ...monthlyPlans.map((plan) => plan.month.slice(0, 4)),
@@ -776,10 +878,14 @@ export default function Home() {
 
     return (
       <main className="min-h-screen bg-[#f4f1ea] px-5 py-8 text-[#20251f] sm:px-8 lg:px-12">
+        <TripManager user={user} month="" mode="hidden" onTripsChange={setYearTrips} />
         <div className="mx-auto max-w-5xl">
           <header className="border-b border-[#20251f]/20 pb-6">
             <Link className="text-xs font-semibold uppercase tracking-[0.2em] text-[#65715e]" href="/overall">Financials</Link>
-            <h1 className="mt-3 text-3xl font-semibold">Your years</h1>
+            <div className="mt-3 flex flex-wrap items-end justify-between gap-4">
+              <h1 className="text-3xl font-semibold">Your years</h1>
+              {exportError && <p className="text-sm text-[#bf5b3f]" role="alert">{exportError}</p>}
+            </div>
           </header>
           <div className="divide-y divide-[#20251f]/20">
             {annualSummaries.map(({ year, annualTotal, transactionCount, metrics }) => (
@@ -788,6 +894,14 @@ export default function Home() {
                   <Link className="text-2xl font-semibold hover:text-[#bf5b3f]" href={`/${year}`}>{year}</Link>
                   <p className="mt-1 text-sm text-[#65715e]">{formatMoney(annualTotal)}</p>
                   <p className="text-xs text-[#65715e]">{transactionCount} expenses</p>
+                  <button
+                    className="mt-3 border border-[#20251f]/20 px-3 py-2 text-sm font-semibold disabled:opacity-50"
+                    type="button"
+                    onClick={() => void exportYear(year)}
+                    disabled={Boolean(exportingYear)}
+                  >
+                    {exportingYear === year ? "Exporting..." : "Export Excel"}
+                  </button>
                 </div>
                 <div aria-label={`${year} annual savings, budget variance, and taxes and other expenses`} className="space-y-4" role="group">
                   {metrics.map((metric) => (
@@ -825,12 +939,50 @@ export default function Home() {
     return (
       <main className="min-h-screen bg-[#f4f1ea] px-5 py-6 text-[#20251f] sm:px-8 lg:px-12">
         <div className="mx-auto max-w-[1440px]">
-          <header className="border-b border-[#20251f]/15 pb-6">
-            <Link href="/overall" className="text-xs font-semibold uppercase tracking-[0.28em] text-[#65715e] hover:text-[#bf5b3f]">Financials</Link>
-            <h1 className="mt-2 text-3xl font-semibold tracking-tight">Trip details</h1>
-          </header>
-          <div className="mt-7 max-w-3xl">
-            <TripManager user={user} month={selectedMonth} tripId={tripId} mode="detail" onTripsChange={setYearTrips} />
+          <div className="grid grid-cols-1 gap-8 lg:grid-cols-[230px_minmax(0,1fr)]">
+            <aside className="border-b border-[#20251f]/15 pb-5 lg:sticky lg:top-6 lg:h-[calc(100vh-3rem)] lg:self-start lg:overflow-y-auto lg:border-b-0 lg:border-r lg:pb-0 lg:pr-6">
+              <div className="mb-4 flex items-baseline justify-between">
+                <h2 className="text-lg font-semibold">{routeYear}</h2>
+                <Link href={`/${routeYear}`} className="text-xs font-semibold uppercase tracking-[0.12em] text-[#65715e] hover:text-[#bf5b3f]">Year</Link>
+              </div>
+              <nav aria-label={`${routeYear} budget periods`} className="flex gap-2 overflow-x-auto pb-2 lg:flex-col lg:gap-1 lg:overflow-visible lg:pb-0">
+                {yearMonths.map((month) => (
+                  <div className="min-w-[132px] lg:min-w-0" key={month.key}>
+                    <Link
+                      href={`/${routeYear}/${monthNames[Number(month.key.slice(5, 7)) - 1]}`}
+                      aria-current={selectedMonth === month.key ? "date" : undefined}
+                      className={`block border px-3 py-2 text-left transition-colors ${selectedMonth === month.key ? "border-[#20251f] bg-[#20251f] text-[#fbfaf7]" : "border-transparent hover:border-[#20251f]/15 hover:bg-[#fbfaf7]"}`}
+                    >
+                      <span className="flex items-center justify-between gap-3 text-sm font-semibold">
+                        {month.label}
+                        <span className={`text-xs font-normal ${selectedMonth === month.key ? "text-[#fbfaf7]/70" : "text-[#65715e]"}`}>{formatMoney(month.total)}</span>
+                      </span>
+                    </Link>
+                    {yearTrips.filter((trip) => trip.month === month.key).map((trip) => (
+                      <Link
+                        key={trip.id}
+                        href={tripPagePath(trip)}
+                        aria-current={trip.id === tripId ? "page" : undefined}
+                        title={trip.name}
+                        className={`ml-3 mt-1 block truncate border-l-2 py-1 pl-3 text-xs transition-colors ${trip.id === tripId ? "border-[#478a9e] font-semibold text-[#478a9e]" : "border-[#20251f]/15 text-[#65715e] hover:border-[#478a9e] hover:text-[#478a9e]"}`}
+                      >
+                        {trip.name}
+                      </Link>
+                    ))}
+                  </div>
+                ))}
+                <Link href={`/${routeYear}/taxes-and-others`} className="min-w-[132px] border border-transparent px-3 py-2 text-sm font-semibold hover:border-[#20251f]/15 hover:bg-[#fbfaf7] lg:min-w-0">Taxes and Others</Link>
+              </nav>
+            </aside>
+            <div className="min-w-0">
+              <header className="border-b border-[#20251f]/15 pb-6">
+                <Link href="/overall" className="text-xs font-semibold uppercase tracking-[0.28em] text-[#65715e] hover:text-[#bf5b3f]">Financials</Link>
+                <h1 className="mt-2 text-3xl font-semibold tracking-tight">Trip details</h1>
+              </header>
+              <div className="mt-7 max-w-3xl">
+                <TripManager user={user} month={selectedMonth} tripId={tripId} mode="detail" onTripsChange={setYearTrips} />
+              </div>
+            </div>
           </div>
         </div>
       </main>
@@ -853,19 +1005,31 @@ export default function Home() {
             </div>
             <nav aria-label={`${currentYear} budget periods`} className="flex gap-2 overflow-x-auto pb-2 lg:flex-col lg:gap-1 lg:overflow-visible lg:pb-0">
               {yearMonths.map((month) => (
-                <button
-                  key={month.key}
-                  aria-current={selectedMonth === month.key ? "date" : undefined}
-                  className={`min-w-[132px] border px-3 py-2 text-left transition-colors lg:min-w-0 ${selectedMonth === month.key ? "border-[#20251f] bg-[#20251f] text-[#fbfaf7]" : "border-transparent hover:border-[#20251f]/15 hover:bg-[#fbfaf7]"}`}
-                  onClick={() => navigateToMonth(month.key)}
-                >
-                  <span className="flex items-center justify-between gap-3 text-sm font-semibold">
-                    {month.label}
-                    <span className={`text-xs font-normal ${selectedMonth === month.key ? "text-[#fbfaf7]/70" : "text-[#65715e]"}`}>
-                      {formatMoney(month.total)}
+                <div className="min-w-[132px] lg:min-w-0" key={month.key}>
+                  <button
+                    aria-current={selectedMonth === month.key ? "date" : undefined}
+                    className={`w-full border px-3 py-2 text-left transition-colors ${selectedMonth === month.key ? "border-[#20251f] bg-[#20251f] text-[#fbfaf7]" : "border-transparent hover:border-[#20251f]/15 hover:bg-[#fbfaf7]"}`}
+                    onClick={() => navigateToMonth(month.key)}
+                  >
+                    <span className="flex items-center justify-between gap-3 text-sm font-semibold">
+                      {month.label}
+                      <span className={`text-xs font-normal ${selectedMonth === month.key ? "text-[#fbfaf7]/70" : "text-[#65715e]"}`}>
+                        {formatMoney(month.total)}
+                      </span>
                     </span>
-                  </span>
-                </button>
+                  </button>
+                  {yearTrips.filter((trip) => trip.month === month.key).map((trip) => (
+                    <Link
+                      key={trip.id}
+                      href={tripPagePath(trip)}
+                      aria-current={isTripView && trip.id === tripId ? "page" : undefined}
+                      title={trip.name}
+                      className={`ml-3 mt-1 block truncate border-l-2 py-1 pl-3 text-xs transition-colors ${isTripView && trip.id === tripId ? "border-[#478a9e] font-semibold text-[#478a9e]" : "border-[#20251f]/15 text-[#65715e] hover:border-[#478a9e] hover:text-[#478a9e]"}`}
+                    >
+                      {trip.name}
+                    </Link>
+                  ))}
+                </div>
               ))}
               <button
                 aria-current={isYearlyExpenseView ? "true" : undefined}
@@ -920,7 +1084,7 @@ export default function Home() {
                 </button>
               </div>
             </header>
-            <div className={`grid gap-5 py-7 sm:grid-cols-2 ${isMonthView ? "2xl:grid-cols-2" : "2xl:grid-cols-4"}`}>
+            <div className={`grid gap-5 py-7 sm:grid-cols-2 ${isMonthView ? "2xl:grid-cols-2" : isYearlyExpenseView ? "2xl:grid-cols-4" : "2xl:grid-cols-3"}`}>
               {isMonthView ? (
                 <>
                   <Stat label="Expenses this month" value={formatMoney(monthTotal)} detail={`${monthTransactions.length} transactions`} />
@@ -945,13 +1109,15 @@ export default function Home() {
                   <Stat
                     label="Savings"
                     value={yearSalary > 0 ? formatMoney(yearSavings) : "-"}
-                    detail={yearSalary > 0 ? `After ${formatMoney(yearTotal)} expenses and ${formatMoney(yearlyExpenseTotal)} taxes/other expenses` : "Set monthly salaries to track"}
+                    detail={yearSalary > 0 ? `After ${formatMoney(yearTotal)} expenses, ${formatMoney(yearTripExpenseTotal)} trip expenses and ${formatMoney(yearlyExpenseTotal)} taxes/other expenses` : "Set monthly salaries to track"}
                   />
-                  <Stat
-                    label={isYearlyExpenseView ? "Taxes and Others" : "Year expenses"}
-                    value={formatMoney(isYearlyExpenseView ? yearlyExpenseTotal : monthTotal)}
-                    detail={isYearlyExpenseView ? `${currentYear} annual expenses` : `${monthTransactions.length} transactions`}
-                  />
+                  {isYearlyExpenseView && (
+                    <Stat
+                      label="Taxes and Others"
+                      value={formatMoney(yearlyExpenseTotal)}
+                      detail={`${currentYear} annual expenses`}
+                    />
+                  )}
                 </>
               )}
             </div>
@@ -962,7 +1128,7 @@ export default function Home() {
                   <h2 className="mt-2 text-2xl font-semibold">Salary &amp; savings</h2>
                   <svg className="mt-5 block h-auto w-full max-w-full" width="720" height="270" viewBox="0 0 720 270" role="img" aria-labelledby="salary-savings-chart-title salary-savings-chart-description">
                     <title id="salary-savings-chart-title">Monthly salary and savings for {currentYear}</title>
-                    <desc id="salary-savings-chart-description">Salary and savings after recorded monthly expenses, shown from January through December.</desc>
+                    <desc id="salary-savings-chart-description">Salary and savings after recorded monthly and trip expenses, shown from January through December.</desc>
                     {salarySavingsTicks.map((tick, index) => {
                       const y = yearChartY(tick);
                       return (
@@ -988,7 +1154,7 @@ export default function Home() {
                   </svg>
                   <div className="mt-1 flex flex-wrap gap-x-5 gap-y-2 text-xs text-[#65715e]">
                     <span><span className="mr-2 inline-block size-2 rounded-full bg-[#bf5b3f]" />Salary</span>
-                    <span><span className="mr-2 inline-block size-2 rounded-full bg-[#4f8271]" />Savings after monthly expenses</span>
+                    <span><span className="mr-2 inline-block size-2 rounded-full bg-[#4f8271]" />Savings after monthly and trip expenses</span>
                   </div>
                 </div>
                 <div className="min-w-0 border border-[#20251f]/15 bg-[#fbfaf7] p-5 sm:p-7">
