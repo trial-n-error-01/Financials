@@ -7,6 +7,7 @@ import { addDoc, collection, deleteDoc, doc, enableNetwork, getDocs, onSnapshot,
 import { onAuthStateChanged, type User } from "firebase/auth";
 import Papa from "papaparse";
 import { auth, db, firebaseConfigured } from "@/lib/firebase";
+import TripManager from "@/components/trip-manager";
 
 type Transaction = {
   id: string;
@@ -790,20 +791,18 @@ export default function Home() {
                   </span>
                 </button>
               ))}
-              {!isMonthView && (
-                <button
-                  aria-current={isYearlyExpenseView ? "true" : undefined}
-                  className={`min-w-[132px] border px-3 py-2 text-left transition-colors lg:min-w-0 ${isYearlyExpenseView ? "border-[#20251f] bg-[#20251f] text-[#fbfaf7]" : "border-transparent hover:border-[#20251f]/15 hover:bg-[#fbfaf7]"}`}
-                  onClick={() => navigateToMonth("yearly-expenses")}
-                >
-                  <span className="flex items-center justify-between gap-3 text-sm font-semibold">
-                    <span>Taxes and Others</span>
-                    <span className={`text-xs font-normal ${isYearlyExpenseView ? "text-[#fbfaf7]/70" : "text-[#65715e]"}`}>
-                      {formatMoney(yearlyExpenseTotal)}
-                    </span>
+              <button
+                aria-current={isYearlyExpenseView ? "true" : undefined}
+                className={`min-w-[132px] border px-3 py-2 text-left transition-colors lg:min-w-0 ${isYearlyExpenseView ? "border-[#20251f] bg-[#20251f] text-[#fbfaf7]" : "border-transparent hover:border-[#20251f]/15 hover:bg-[#fbfaf7]"}`}
+                onClick={() => navigateToMonth("yearly-expenses")}
+              >
+                <span className="flex items-center justify-between gap-3 text-sm font-semibold">
+                  <span>Taxes and Others</span>
+                  <span className={`text-xs font-normal ${isYearlyExpenseView ? "text-[#fbfaf7]/70" : "text-[#65715e]"}`}>
+                    {formatMoney(yearlyExpenseTotal)}
                   </span>
-                </button>
-              )}
+                </span>
+              </button>
             </nav>
           </aside>
           <div className="min-w-0">
@@ -1124,6 +1123,7 @@ export default function Home() {
                 )}
               </div>
             </section>
+            {isMonthView && <TripManager user={user} month={selectedMonth} />}
             {!isMonthView && showExpenseHistory && expenseHistorySection}
           </div>
         </div>
