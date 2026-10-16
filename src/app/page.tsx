@@ -98,6 +98,7 @@ export default function Home() {
   const [yearTrips, setYearTrips] = useState<Trip[]>([]);
   const [exportingYear, setExportingYear] = useState("");
   const [exportError, setExportError] = useState("");
+  const [showYears, setShowYears] = useState(true);
   const [yearlyExpenses, setYearlyExpenses] = useState<Record<string, YearlyExpenseEntry[]>>({});
   const [yearlyExpenseName, setYearlyExpenseName] = useState("");
   const [yearlyExpenseAmount, setYearlyExpenseAmount] = useState("");
@@ -884,10 +885,20 @@ export default function Home() {
             <Link className="text-xs font-semibold uppercase tracking-[0.2em] text-[#65715e]" href="/overall">Financials</Link>
             <div className="mt-3 flex flex-wrap items-end justify-between gap-4">
               <h1 className="text-3xl font-semibold">Your years</h1>
+              <button
+                aria-controls="annual-summaries"
+                aria-expanded={showYears}
+                className="inline-flex items-center gap-2 border border-[#20251f]/20 px-3 py-2 text-sm font-semibold hover:bg-[#fbfaf7]"
+                onClick={() => setShowYears((shown) => !shown)}
+                type="button"
+              >
+                {showYears ? "Hide years" : "Show years"}
+                <span aria-hidden="true">{showYears ? "^" : "v"}</span>
+              </button>
               {exportError && <p className="text-sm text-[#bf5b3f]" role="alert">{exportError}</p>}
             </div>
           </header>
-          <div className="divide-y divide-[#20251f]/20">
+          <div className="divide-y divide-[#20251f]/20" hidden={!showYears} id="annual-summaries">
             {annualSummaries.map(({ year, annualTotal, transactionCount, metrics }) => (
               <section className="grid gap-5 py-6 sm:grid-cols-[150px_minmax(0,1fr)] sm:gap-8" key={year}>
                 <div>
