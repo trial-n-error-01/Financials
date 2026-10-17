@@ -34,6 +34,18 @@ type YearlyExpenseEntry = {
   amountCents: number;
 };
 
+type AccountType = "cash" | "investment" | "retirement";
+
+type FinancialAccount = {
+  id: string;
+  userId: string;
+  name: string;
+  accountType: AccountType;
+  balanceCents: number;
+  includeInLiquidAssets: boolean;
+  updatedAt: string;
+};
+
 type ImportRow = Omit<Transaction, "id" | "userId">;
 type SortKey = "date" | "merchant" | "category" | "paymentMethod" | "amountCents";
 
@@ -53,6 +65,11 @@ const monthLabel = (key: string) => key === "all" ? "All months" : new Intl.Date
 const monthNames = Array.from({ length: 12 }, (_, index) => new Intl.DateTimeFormat("en-GB", { month: "long" }).format(new Date(2026, index, 1)).toLowerCase());
 const tripPagePath = (trip: Trip) => `/${trip.month.slice(0, 4)}/${monthNames[Number(trip.month.slice(5, 7)) - 1]}/trips/${encodeURIComponent(trip.id)}`;
 const categoryChartColors = ["#bf5b3f", "#4f8271", "#d39b45", "#6478a6", "#9a6586", "#71833c", "#478a9e", "#ce7757"];
+const accountTypeLabels: Record<AccountType, string> = { cash: "Cash", investment: "Investment", retirement: "Retirement" };
+const accountUpdatedLabel = (updatedAt: string) => {
+  const date = new Date(updatedAt);
+  return Number.isNaN(date.getTime()) ? "Update date unavailable" : `Updated ${new Intl.DateTimeFormat("en-HK").format(date)}`;
+};
 
 function parseYearlyExpenseCache(value: string): Record<string, YearlyExpenseEntry[]> {
   const cached = JSON.parse(value) as Record<string, unknown>;
@@ -86,6 +103,7 @@ export default function Home() {
   const tripId = pathSegments[3] ?? "";
   const isTripView = Boolean(routeYear && routeMonthIndex >= 0 && pathSegments.length === 4 && pathSegments[2] === "trips" && tripId);
   const isOverallView = pathname === "/overall" || pathname === "/";
+  const isAccountsView = pathname === "/accounts";
   const isMonthView = Boolean(routeYear && routeMonthIndex >= 0);
   const selectedMonth = isYearlyExpenseRoute
     ? "yearly-expenses"
@@ -96,6 +114,14 @@ export default function Home() {
   const [transactions, setTransactions] = useState<Transaction[]>(firebaseConfigured ? [] : demoTransactions);
   const [monthlyPlans, setMonthlyPlans] = useState<MonthlyPlan[]>([]);
   const [yearTrips, setYearTrips] = useState<Trip[]>([]);
+  const [financialAccounts, setFinancialAccounts] = useState<FinancialAccount[]>([]);
+  const [isAccountFormOpen, setIsAccountFormOpen] = useState(false);
+  const [editingAccountId, setEditingAccountId] = useState("");
+  const [accountDraft, setAccountDraft] = useState({ name: "", balance: "", accountType: "cash" as AccountType, includeInLiquidAssets: true });
+  const [accountError, setAccountError] = useState("");
+  const [accountMessage, setAccountMessage] = useState("");
+  const [savingAccount, setSavingAccount] = useState(false);
+  const [removingAccountId, setRemovingAccountId] = useState("");
   const [exportingYear, setExportingYear] = useState("");
   const [exportError, setExportError] = useState("");
   const [showYears, setShowYears] = useState(true);
@@ -135,7 +161,7 @@ export default function Home() {
       router.replace("/overall");
       return;
     }
-    if (pathname === "/overall") return;
+    if (pathname === "/overall" || pathname === "/accounts") return;
     if (!routeYear) {
       router.replace("/overall");
       return;
@@ -265,6 +291,43 @@ export default function Home() {
   }, [user]);
 
   useEffect(() => {
+    const cacheKey = `financials:accounts:${user?.uid ?? "demo"}`;
+    if (!db || !user) {
+      if (firebaseConfigured) return;
+      const cachedAccounts = window.localStorage.getItem(cacheKey);
+      if (cachedAccounts) {
+        try {
+          startTransition(() => setFinancialAccounts(JSON.parse(cachedAccounts) as FinancialAccount[]));
+        } catch {
+          window.localStorage.removeItem(cacheKey);
+        }
+      }
+      return;
+    }
+
+    const cachedAccounts = window.localStorage.getItem(cacheKey);
+    if (cachedAccounts) {
+      try {
+        startTransition(() => setFinancialAccounts(JSON.parse(cachedAccounts) as FinancialAccount[]));
+      } catch {
+        window.localStorage.removeItem(cacheKey);
+      }
+    }
+    const accountsQuery = query(collection(db, "financialAccounts"), where("userId", "==", user.uid));
+    return onSnapshot(accountsQuery, { includeMetadataChanges: true }, (snapshot) => {
+      const accounts = snapshot.docs.map((item) => ({ id: item.id, ...item.data() } as FinancialAccount));
+      setFinancialAccounts((current) => {
+        if (accounts.length === 0 && current.length > 0 && snapshot.metadata.fromCache) return current;
+        window.localStorage.setItem(cacheKey, JSON.stringify(accounts));
+        return accounts;
+      });
+      setAccountError("");
+    }, (error) => {
+      setAccountError(`Could not load accounts: ${error.message}`);
+    });
+  }, [user]);
+
+  useEffect(() => {
     if (!db || !user) return;
     const cacheKey = `financials:categories:${user.uid}`;
     const cachedCategories = window.localStorage.getItem(cacheKey);
@@ -288,6 +351,14 @@ export default function Home() {
   }, [user]);
 
   const categories = useMemo(() => [...new Set(userCategories)].sort(), [userCategories]);
+
+  const accountOwnerId = user?.uid ?? (firebaseConfigured ? "" : "demo");
+  const activeFinancialAccounts = financialAccounts.filter((account) => accountOwnerId && account.userId === accountOwnerId);
+  const liquidAccounts = activeFinancialAccounts.filter((account) => account.includeInLiquidAssets);
+  const cashTotal = liquidAccounts.filter((account) => account.accountType === "cash").reduce((total, account) => total + account.balanceCents, 0);
+  const investmentTotal = liquidAccounts.filter((account) => account.accountType === "investment").reduce((total, account) => total + account.balanceCents, 0);
+  const netLiquidAssets = liquidAccounts.reduce((total, account) => total + account.balanceCents, 0);
+  const outsideLiquidTotal = activeFinancialAccounts.filter((account) => !account.includeInLiquidAssets).reduce((total, account) => total + account.balanceCents, 0);
 
   const currentYear = routeYear ? Number(routeYear) : new Date().getFullYear();
   const currentYearExpenseEntries = yearlyExpenses[String(currentYear)] ?? [];
@@ -468,6 +539,89 @@ export default function Home() {
       setPlanSaveError(error instanceof Error ? error.message : "Could not save this monthly plan.");
     } finally {
       setSavingPlan(false);
+    }
+  };
+
+  const resetAccountForm = () => {
+    setAccountDraft({ name: "", balance: "", accountType: "cash", includeInLiquidAssets: true });
+    setEditingAccountId("");
+    setIsAccountFormOpen(false);
+  };
+
+  const saveFinancialAccount = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const name = accountDraft.name.trim();
+    const balance = Number(accountDraft.balance);
+    if (!name || !accountDraft.balance.trim() || !Number.isFinite(balance) || balance < 0) {
+      setAccountError("Enter an account name and a valid non-negative balance.");
+      setAccountMessage("");
+      return;
+    }
+    if (firebaseConfigured && (!db || !user)) {
+      setAccountError("Sign in before saving accounts.");
+      setAccountMessage("");
+      return;
+    }
+
+    setSavingAccount(true);
+    setAccountError("");
+    setAccountMessage("");
+    const account: FinancialAccount = {
+      id: editingAccountId || `${accountOwnerId}_${crypto.randomUUID()}`,
+      userId: accountOwnerId,
+      name,
+      accountType: accountDraft.accountType,
+      balanceCents: Math.round(balance * 100),
+      includeInLiquidAssets: accountDraft.includeInLiquidAssets,
+      updatedAt: new Date().toISOString(),
+    };
+    try {
+      if (db && user) {
+        await setDoc(doc(db, "financialAccounts", account.id), account);
+      }
+      const nextAccounts = editingAccountId
+        ? activeFinancialAccounts.map((item) => item.id === editingAccountId ? account : item)
+        : [...activeFinancialAccounts, account];
+      setFinancialAccounts(nextAccounts);
+      window.localStorage.setItem(`financials:accounts:${accountOwnerId}`, JSON.stringify(nextAccounts));
+      resetAccountForm();
+      setAccountMessage(editingAccountId ? "Account updated." : "Account added.");
+    } catch (error) {
+      setAccountError(error instanceof Error ? error.message : "Could not save this account.");
+    } finally {
+      setSavingAccount(false);
+    }
+  };
+
+  const editFinancialAccount = (account: FinancialAccount) => {
+    setAccountDraft({
+      name: account.name,
+      balance: (account.balanceCents / 100).toFixed(2),
+      accountType: account.accountType,
+      includeInLiquidAssets: account.includeInLiquidAssets,
+    });
+    setEditingAccountId(account.id);
+    setIsAccountFormOpen(true);
+    setAccountError("");
+    setAccountMessage("");
+  };
+
+  const removeFinancialAccount = async (account: FinancialAccount) => {
+    if (!window.confirm(`Remove ${account.name}?`)) return;
+    setRemovingAccountId(account.id);
+    setAccountError("");
+    setAccountMessage("");
+    try {
+      if (firebaseConfigured && (!db || !user)) throw new Error("Sign in before removing accounts.");
+      if (db && user) await deleteDoc(doc(db, "financialAccounts", account.id));
+      const nextAccounts = activeFinancialAccounts.filter((item) => item.id !== account.id);
+      setFinancialAccounts(nextAccounts);
+      window.localStorage.setItem(`financials:accounts:${accountOwnerId}`, JSON.stringify(nextAccounts));
+      setAccountMessage("Account removed.");
+    } catch (error) {
+      setAccountError(error instanceof Error ? error.message : "Could not remove this account.");
+    } finally {
+      setRemovingAccountId("");
     }
   };
 
@@ -757,6 +911,142 @@ export default function Home() {
     </section>
   );
 
+  if (isAccountsView) {
+    return (
+      <main className="min-h-screen bg-[#f4f1ea] px-5 py-8 text-[#20251f] sm:px-8 lg:px-12">
+        <div className="mx-auto max-w-4xl">
+          <header className="border-b border-[#20251f]/20 pb-6">
+            <Link className="text-xs font-semibold uppercase tracking-[0.2em] text-[#65715e] hover:text-[#bf5b3f]" href="/overall">Financials</Link>
+            <div className="mt-3 flex flex-wrap items-end justify-between gap-4">
+              <div>
+                <h1 className="text-3xl font-semibold">Accounts</h1>
+                <p className="mt-2 text-sm text-[#65715e]">Track current balances in HKD.</p>
+              </div>
+              <button
+                className="bg-[#20251f] px-4 py-2 text-sm font-semibold text-[#fbfaf7] disabled:opacity-50"
+                disabled={firebaseConfigured && !user}
+                onClick={() => {
+                  if (isAccountFormOpen) resetAccountForm();
+                  else {
+                    setAccountMessage("");
+                    setAccountError("");
+                    setIsAccountFormOpen(true);
+                  }
+                }}
+                type="button"
+              >
+                {isAccountFormOpen ? "Cancel" : "+ Add account"}
+              </button>
+            </div>
+          </header>
+
+          <section aria-label="Account balances" className="grid gap-5 border-b border-[#20251f]/20 py-6 sm:grid-cols-3">
+            <Stat label="Net liquid assets" value={formatMoney(netLiquidAssets)} detail="Cash and included investments" />
+            <Stat label="Cash" value={formatMoney(cashTotal)} detail="Included in liquid assets" />
+            <Stat label="Investments" value={formatMoney(investmentTotal)} detail="Included in liquid assets" />
+          </section>
+
+          {firebaseConfigured && !user && <p className="border-b border-[#20251f]/20 py-5 text-sm text-[#65715e]">Sign in to add and manage accounts.</p>}
+          {accountError && <p className="mt-5 text-sm text-[#bf5b3f]" role="alert">{accountError}</p>}
+          {accountMessage && <p className="mt-5 text-sm text-[#4f8271]" role="status">{accountMessage}</p>}
+
+          {isAccountFormOpen && (
+            <form className="grid gap-4 border-b border-[#20251f]/20 py-6 sm:grid-cols-2" onSubmit={saveFinancialAccount}>
+              <label className="block text-sm font-semibold">
+                Account name
+                <input
+                  autoComplete="off"
+                  className="mt-2 w-full border border-[#20251f]/15 bg-[#fbfaf7] px-3 py-2 font-normal"
+                  maxLength={60}
+                  onChange={(event) => setAccountDraft((draft) => ({ ...draft, name: event.target.value }))}
+                  placeholder="Everyday bank account"
+                  required
+                  value={accountDraft.name}
+                />
+              </label>
+              <label className="block text-sm font-semibold">
+                Account type
+                <select
+                  className="mt-2 w-full border border-[#20251f]/15 bg-[#fbfaf7] px-3 py-2 font-normal"
+                  onChange={(event) => {
+                    const accountType = event.target.value as AccountType;
+                    setAccountDraft((draft) => ({ ...draft, accountType, includeInLiquidAssets: accountType !== "retirement" }));
+                  }}
+                  value={accountDraft.accountType}
+                >
+                  <option value="cash">Cash</option>
+                  <option value="investment">Investment</option>
+                  <option value="retirement">Retirement</option>
+                </select>
+              </label>
+              <label className="block text-sm font-semibold">
+                Current balance (HKD)
+                <input
+                  className="mt-2 w-full border border-[#20251f]/15 bg-[#fbfaf7] px-3 py-2 font-normal"
+                  inputMode="decimal"
+                  min="0"
+                  onChange={(event) => setAccountDraft((draft) => ({ ...draft, balance: event.target.value }))}
+                  placeholder="0.00"
+                  required
+                  step="0.01"
+                  type="number"
+                  value={accountDraft.balance}
+                />
+              </label>
+              <div className="flex items-center sm:pt-6">
+                <label className="flex items-center gap-2 text-sm font-semibold">
+                  <input
+                    checked={accountDraft.includeInLiquidAssets}
+                    onChange={(event) => setAccountDraft((draft) => ({ ...draft, includeInLiquidAssets: event.target.checked }))}
+                    type="checkbox"
+                  />
+                  Count toward net liquid assets
+                </label>
+              </div>
+              <div className="flex flex-wrap items-center gap-3 sm:col-span-2">
+                <button className="bg-[#4f8271] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" disabled={savingAccount} type="submit">
+                  {savingAccount ? "Saving..." : editingAccountId ? "Save changes" : "Add account"}
+                </button>
+                {editingAccountId && <button className="px-3 py-2 text-sm font-semibold text-[#65715e] hover:text-[#bf5b3f]" onClick={resetAccountForm} type="button">Cancel edit</button>}
+              </div>
+            </form>
+          )}
+
+          <div className="flex flex-wrap items-baseline justify-between gap-3 border-b border-[#20251f]/20 py-5">
+            <h2 className="text-xl font-semibold">Tracked accounts</h2>
+            <p className="text-sm text-[#65715e]">Outside liquid assets: {formatMoney(outsideLiquidTotal)}</p>
+          </div>
+          {activeFinancialAccounts.length === 0 ? (
+            <p className="py-8 text-sm text-[#65715e]">No accounts yet. Add your first balance to see it in your overall total.</p>
+          ) : (
+            <ul className="divide-y divide-[#20251f]/15">
+              {activeFinancialAccounts.map((account) => (
+                <li className="flex flex-wrap items-center justify-between gap-4 py-5" key={account.id}>
+                  <div className="min-w-0">
+                    <h3 className="break-words font-semibold">{account.name}</h3>
+                    <p className="mt-1 text-xs text-[#65715e]">{accountTypeLabels[account.accountType]} · {account.includeInLiquidAssets ? "Included in liquid assets" : "Outside liquid assets"} · {accountUpdatedLabel(account.updatedAt)}</p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-4">
+                    <span className="font-semibold tabular-nums">{formatMoney(account.balanceCents)}</span>
+                    <button className="text-sm font-semibold text-[#65715e] hover:text-[#bf5b3f]" onClick={() => editFinancialAccount(account)} type="button">Edit</button>
+                    <button
+                      className="text-sm font-semibold text-[#bf5b3f] disabled:opacity-50"
+                      disabled={Boolean(removingAccountId)}
+                      onClick={() => void removeFinancialAccount(account)}
+                      type="button"
+                    >
+                      {removingAccountId === account.id ? "Removing..." : "Remove"}
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </main>
+    );
+  }
+
   if (isOverallView) {
     const exportYear = async (year: string) => {
       setExportingYear(year);
@@ -898,6 +1188,14 @@ export default function Home() {
               {exportError && <p className="text-sm text-[#bf5b3f]" role="alert">{exportError}</p>}
             </div>
           </header>
+          <section aria-labelledby="net-liquid-assets-heading" className="flex flex-wrap items-end justify-between gap-5 border-b border-[#20251f]/20 py-7">
+            <div>
+              <h2 className="text-xs font-semibold uppercase tracking-[0.16em] text-[#65715e]" id="net-liquid-assets-heading">Net liquid assets</h2>
+              <p className="mt-2 text-3xl font-semibold tabular-nums sm:text-4xl">{formatMoney(netLiquidAssets)}</p>
+              <p className="mt-2 text-sm text-[#65715e]">Cash {formatMoney(cashTotal)} · Investments {formatMoney(investmentTotal)} · Retirement excluded {formatMoney(outsideLiquidTotal)}</p>
+            </div>
+            <Link className="border border-[#20251f]/20 px-4 py-2 text-sm font-semibold hover:bg-[#fbfaf7]" href="/accounts">Manage accounts</Link>
+          </section>
           <div className="divide-y divide-[#20251f]/20" hidden={!showYears} id="annual-summaries">
             {annualSummaries.map(({ year, annualTotal, transactionCount, metrics }) => (
               <section className="grid gap-5 py-6 sm:grid-cols-[150px_minmax(0,1fr)] sm:gap-8" key={year}>
