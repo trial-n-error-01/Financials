@@ -359,6 +359,7 @@ export default function Home() {
   const investmentTotal = liquidAccounts.filter((account) => account.accountType === "investment").reduce((total, account) => total + account.balanceCents, 0);
   const netLiquidAssets = liquidAccounts.reduce((total, account) => total + account.balanceCents, 0);
   const outsideLiquidTotal = activeFinancialAccounts.filter((account) => !account.includeInLiquidAssets).reduce((total, account) => total + account.balanceCents, 0);
+  const totalAssets = activeFinancialAccounts.reduce((total, account) => total + account.balanceCents, 0);
 
   const currentYear = routeYear ? Number(routeYear) : new Date().getFullYear();
   const currentYearExpenseEntries = yearlyExpenses[String(currentYear)] ?? [];
@@ -1188,13 +1189,20 @@ export default function Home() {
               {exportError && <p className="text-sm text-[#bf5b3f]" role="alert">{exportError}</p>}
             </div>
           </header>
-          <section aria-labelledby="net-liquid-assets-heading" className="flex flex-wrap items-end justify-between gap-5 border-b border-[#20251f]/20 py-7">
-            <div>
-              <h2 className="text-xs font-semibold uppercase tracking-[0.16em] text-[#65715e]" id="net-liquid-assets-heading">Net liquid assets</h2>
-              <p className="mt-2 text-3xl font-semibold tabular-nums sm:text-4xl">{formatMoney(netLiquidAssets)}</p>
-              <p className="mt-2 text-sm text-[#65715e]">Cash {formatMoney(cashTotal)} · Investments {formatMoney(investmentTotal)} · Retirement excluded {formatMoney(outsideLiquidTotal)}</p>
+          <section aria-labelledby="total-assets-heading" className="border-b border-[#20251f]/20 py-7">
+            <div className="flex flex-wrap items-end justify-between gap-5">
+              <div>
+                <h2 className="text-xs font-semibold uppercase tracking-[0.16em] text-[#65715e]" id="total-assets-heading">Total assets</h2>
+                <p className="mt-2 text-4xl font-semibold tabular-nums sm:text-5xl">{formatMoney(totalAssets)}</p>
+                <p className="mt-2 text-sm text-[#65715e]">All tracked accounts, including non-liquid assets</p>
+              </div>
+              <Link className="border border-[#20251f]/20 px-4 py-2 text-sm font-semibold hover:bg-[#fbfaf7]" href="/accounts">Manage accounts</Link>
             </div>
-            <Link className="border border-[#20251f]/20 px-4 py-2 text-sm font-semibold hover:bg-[#fbfaf7]" href="/accounts">Manage accounts</Link>
+            <div className="mt-6 border-t border-[#20251f]/15 pt-4">
+              <h2 className="text-xs font-semibold uppercase tracking-[0.16em] text-[#65715e]" id="net-liquid-assets-heading">Net liquid assets</h2>
+              <p className="mt-1 text-2xl font-semibold tabular-nums sm:text-3xl">{formatMoney(netLiquidAssets)}</p>
+              <p className="mt-1 text-sm text-[#65715e]">Cash {formatMoney(cashTotal)} · Investments {formatMoney(investmentTotal)} · Retirement excluded {formatMoney(outsideLiquidTotal)}</p>
+            </div>
           </section>
           <div className="divide-y divide-[#20251f]/20" hidden={!showYears} id="annual-summaries">
             {annualSummaries.map(({ year, annualTotal, transactionCount, metrics }) => (
